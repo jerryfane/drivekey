@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -17,8 +18,8 @@ func TestResolvePrecedence(t *testing.T) {
 		want string
 	}{
 		{map[string]string{"DRIVEKEY_HOME": "/x", "XDG_CONFIG_HOME": "/xdg"}, "/x"},
-		{map[string]string{"XDG_CONFIG_HOME": "/xdg"}, "/xdg/drivekey"},
-		{map[string]string{}, "/home/u/.config/drivekey"},
+		{map[string]string{"XDG_CONFIG_HOME": "/xdg"}, filepath.Join("/xdg", "drivekey")},
+		{map[string]string{}, filepath.Join("/home/u", ".config", "drivekey")},
 	}
 	for _, c := range cases {
 		d, err := Resolve(env(c.vars), home)
@@ -135,9 +136,12 @@ func TestEnsureAndConfigArePrivate(t *testing.T) {
 	if err := d.Ensure(); err != nil {
 		t.Fatal(err)
 	}
+	// Windows reports only a read-only bit in Go file modes; privacy there comes from the
+	// per-user profile directory's ACL, so the Unix permission checks do not apply.
+	unixPerms := runtime.GOOS != "windows"
 	for _, p := range []string{d.Root, d.GcloudConfig(), d.LoginDir()} {
 		st, err := os.Stat(p)
-		if err != nil || st.Mode().Perm() != 0o700 {
+		if err != nil || (unixPerms && st.Mode().Perm() != 0o700) {
 			t.Errorf("%s: mode %v err %v", p, st.Mode().Perm(), err)
 		}
 	}
@@ -149,7 +153,7 @@ func TestEnsureAndConfigArePrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, _ := os.Stat(filepath.Join(d.Root, "config.json"))
-	if st.Mode().Perm() != 0o600 {
+	if unixPerms && st.Mode().Perm() != 0o600 {
 		t.Errorf("config mode %v", st.Mode().Perm())
 	}
 	if got, err := d.LoadConfig(); err != nil || got != want {
