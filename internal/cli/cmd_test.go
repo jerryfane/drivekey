@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/api/drive/v3"
 
@@ -142,5 +143,81 @@ func TestChangesNotLostWhenOutputFails(t *testing.T) {
 	}
 	if got := changeNames(t, out.String()); len(got) != 1 || got[0] != "new" {
 		t.Fatalf("after a failed write, changes = %v, want [new]", got)
+	}
+}
+
+func TestChangesReportsRemovalDuringSeeding(t *testing.T) {
+	g := changesFixture(t)
+	// The pre-existing file is deleted forever right after the start position is taken,
+	// before the folder listing would have reached it.
+	g.afterStartToken = func(g *fakeGoogle) {
+		g.children["sub"] = nil
+		delete(g.files, "old")
+		g.changes = []*drive.Change{{FileId: "old", Removed: true, Time: "t1"}}
+	}
+	var out strings.Builder
+	a := newTestApp(t, g, &out)
+	ctx := context.Background()
+	if _, err := runChanges(ctx, a, []string{"--folder", "F"}); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if _, err := runChanges(ctx, a, []string{"--folder", "F"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := changeNames(t, out.String()); len(got) != 1 || got[0] != "old" {
+		t.Fatalf("changes = %v, want [old]", got)
+	}
+}
+
+// blockingWriter blocks every write until release is closed, like a full pipe nobody reads.
+type blockingWriter struct{ release chan struct{} }
+
+func (b blockingWriter) Write(p []byte) (int, error) { <-b.release; return len(p), nil }
+
+func TestStalledWatchDoesNotBlockOtherCommands(t *testing.T) {
+	g := changesFixture(t)
+	a := newTestApp(t, g, &strings.Builder{})
+	ctx := context.Background()
+	if err := watchOnce(ctx, a, "F"); err != nil { // starts tracking
+		t.Fatal(err)
+	}
+	g.addFile("new", "new.txt", "text/plain", "sub")
+	g.changes = []*drive.Change{{FileId: "new", Time: "t1", File: g.files["new"]}}
+	release := make(chan struct{})
+	a.Stdout = blockingWriter{release}
+	done := make(chan error, 1)
+	go func() { done <- watchOnce(ctx, a, "F") }()
+	time.Sleep(200 * time.Millisecond) // let watch reach the blocked write
+	l, err := a.Dir.Lock(ctx, 2*time.Second)
+	if err != nil {
+		close(release)
+		t.Fatalf("another command could not take the state lock while watch output was stalled: %v", err)
+	}
+	l.Unlock()
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChangesReportsRemovalOfFileCreatedDuringSeeding(t *testing.T) {
+	g := changesFixture(t)
+	// A file appears in the folder after the first listing but before the start position, so
+	// its creation is not in the feed; its later removal still has to be reported.
+	g.afterList = func(g *fakeGoogle) { g.addFile("late", "late.txt", "text/plain", "F") }
+	var out strings.Builder
+	a := newTestApp(t, g, &out)
+	ctx := context.Background()
+	if _, err := runChanges(ctx, a, []string{"--folder", "F"}); err != nil {
+		t.Fatal(err)
+	}
+	g.changes = []*drive.Change{{FileId: "late", Removed: true, Time: "t1"}}
+	out.Reset()
+	if _, err := runChanges(ctx, a, []string{"--folder", "F"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := changeNames(t, out.String()); len(got) != 1 || got[0] != "late" {
+		t.Fatalf("changes = %v, want [late]", got)
 	}
 }

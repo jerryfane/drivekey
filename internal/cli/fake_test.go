@@ -33,12 +33,14 @@ type fakeGoogle struct {
 	// Drive.
 	children map[string][]*drive.File // parent id -> children
 	files    map[string]*drive.File
-	token    int
 	changes  []*drive.Change // changes after token 1
+	// afterStartToken runs once after the start position is handed out; afterList runs once
+	// after the first folder listing.
+	afterStartToken, afterList func(g *fakeGoogle)
 }
 
 func newFakeGoogle(t *testing.T) *fakeGoogle {
-	return &fakeGoogle{t: t, children: map[string][]*drive.File{}, files: map[string]*drive.File{}, token: 1}
+	return &fakeGoogle{t: t, children: map[string][]*drive.File{}, files: map[string]*drive.File{}}
 }
 
 func (g *fakeGoogle) addFile(id, name, mime, parent string) {
@@ -101,6 +103,11 @@ func (g *fakeGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeBody(w, &sheets.UpdateValuesResponse{UpdatedRange: rng, UpdatedCells: 1})
 	case p == "/drive/v3/changes/startPageToken":
 		writeBody(w, &drive.StartPageToken{StartPageToken: "1"})
+		if g.afterStartToken != nil {
+			f := g.afterStartToken
+			g.afterStartToken = nil
+			f(g)
+		}
 	case p == "/drive/v3/changes":
 		if r.URL.Query().Get("pageToken") == "1" {
 			writeBody(w, &drive.ChangeList{Changes: g.changes, NewStartPageToken: "2"})
@@ -111,6 +118,11 @@ func (g *fakeGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("q")
 		parent := strings.Trim(strings.TrimSuffix(q, " in parents"), "'")
 		writeBody(w, &drive.FileList{Files: g.children[parent]})
+		if g.afterList != nil {
+			f := g.afterList
+			g.afterList = nil
+			f(g)
+		}
 	case strings.HasPrefix(p, "/drive/v3/files/") && r.Method == http.MethodGet:
 		id := strings.TrimPrefix(p, "/drive/v3/files/")
 		f, ok := g.files[id]

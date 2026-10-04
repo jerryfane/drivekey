@@ -160,9 +160,6 @@ func runLogout(ctx context.Context, a *App, args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := a.Dir.Purge(); err != nil {
-		return nil, err
-	}
 	out := map[string]any{"logged_out": true, "revoked": revoked, "state_deleted": a.Dir.Root}
 	if cfg.Project != "" {
 		out["project_kept"] = cfg.Project

@@ -67,10 +67,10 @@ func (d Dir) Ensure() error {
 	return nil
 }
 
-// Owned reports whether Root is a drivekey state directory.
+// Owned reports whether Root is a drivekey state directory: its marker is a regular file.
 func (d Dir) Owned() bool {
-	_, err := os.Stat(filepath.Join(d.Root, markerFile))
-	return err == nil
+	st, err := os.Lstat(filepath.Join(d.Root, markerFile))
+	return err == nil && st.Mode().IsRegular()
 }
 
 // GcloudConfig is the private CLOUDSDK_CONFIG directory.
@@ -87,45 +87,20 @@ func (d Dir) ChangesFile() string { return filepath.Join(d.Root, "changes.json")
 
 func (d Dir) configFile() string { return filepath.Join(d.Root, "config.json") }
 
-// Clear deletes drivekey's state but keeps the marker and the lock file, so it can run while
-// the lock is held. It does nothing if Root is not a drivekey state directory.
+// Clear deletes the state drivekey keeps: the login, cached token, change feeds and config.
+// It deletes only those entries, never anything else in Root, and only if Root is a drivekey
+// state directory. The marker and the lock file stay, so Clear can run while the lock is held
+// and commands waiting on the lock keep locking the same file.
 func (d Dir) Clear() error {
 	if !d.Owned() {
 		return nil
 	}
-	entries, err := os.ReadDir(d.Root)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.Name() == markerFile || e.Name() == "lock" {
-			continue
-		}
-		if err := os.RemoveAll(filepath.Join(d.Root, e.Name())); err != nil {
+	for _, p := range []string{d.GcloudConfig(), d.LoginDir(), d.TokenCache(), d.ChangesFile(), d.configFile()} {
+		if err := os.RemoveAll(p); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// Purge removes the lock file, the marker and Root after Clear, once the lock is released.
-// Root is kept if anything else appeared in it meanwhile.
-func (d Dir) Purge() error {
-	if !d.Owned() {
-		return nil
-	}
-	_ = os.Remove(d.LockFile())
-	entries, err := os.ReadDir(d.Root)
-	if err != nil {
-		return err
-	}
-	if len(entries) != 1 || entries[0].Name() != markerFile {
-		return nil
-	}
-	if err := os.Remove(filepath.Join(d.Root, markerFile)); err != nil {
-		return err
-	}
-	return os.Remove(d.Root)
 }
 
 // Config is drivekey's persistent configuration.

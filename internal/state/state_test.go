@@ -48,20 +48,36 @@ func TestForeignDirectoryIsNeverUsedOrDeleted(t *testing.T) {
 	if err := d.Clear(); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Purge(); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := os.Stat(foreign); err != nil {
 		t.Fatalf("foreign file deleted: %v", err)
 	}
+	// A directory that happens to contain something named .drivekey that is not our marker file.
+	collide := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(collide, ".drivekey"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(collide, "config.json")
+	if err := os.WriteFile(other, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Dir{Root: collide}).Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("file in a non-drivekey directory deleted: %v", err)
+	}
 }
 
-func TestClearAndPurgeOwnDirectory(t *testing.T) {
+func TestClearDeletesOnlyDrivekeyState(t *testing.T) {
 	d := Dir{Root: filepath.Join(t.TempDir(), "dk")}
 	if err := d.Ensure(); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.SaveConfig(Config{Account: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	notes := filepath.Join(d.Root, "notes.txt") // put there by the user after setup
+	if err := os.WriteFile(notes, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	l, err := d.Lock(context.Background(), time.Second)
@@ -71,15 +87,19 @@ func TestClearAndPurgeOwnDirectory(t *testing.T) {
 	if err := d.Clear(); err != nil {
 		t.Fatal(err)
 	}
+	l.Unlock()
 	if c, _ := d.LoadConfig(); c.Account != "" {
 		t.Fatal("config survived Clear")
 	}
-	l.Unlock()
-	if err := d.Purge(); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(d.GcloudConfig()); !os.IsNotExist(err) {
+		t.Fatal("gcloud login survived Clear")
 	}
-	if _, err := os.Stat(d.Root); !os.IsNotExist(err) {
-		t.Fatalf("root kept: %v", err)
+	if _, err := os.Stat(notes); err != nil {
+		t.Fatalf("user file deleted: %v", err)
+	}
+	// The lock file stays, so a command that opened it before Clear locks the same file as later ones.
+	if _, err := os.Stat(d.LockFile()); err != nil {
+		t.Fatalf("lock file removed: %v", err)
 	}
 }
 
