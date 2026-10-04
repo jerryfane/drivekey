@@ -4,8 +4,8 @@ Give your AI agent its own access to your Google Drive and Google Sheets.
 You open one link, log in with your Google account, and you are done.
 No clicking through the Google Cloud console, no app to register, nothing pre-configured.
 
-> **Status: early.** All commands work against a real personal Google account; no
-> release has been tagged yet. Build from source: `go build ./cmd/drivekey`.
+> **Status: early (v0.1.0).** All commands work against a real personal Google account.
+> Linux, macOS and Windows binaries are on the [releases page](https://github.com/jerryfane/drivekey/releases).
 
 ## Why
 
