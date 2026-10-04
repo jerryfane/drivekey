@@ -27,11 +27,12 @@ so they get their own rate limits and nothing depends on a shared app.
 | Step | Who | What |
 |---|---|---|
 | 1 | agent | Installs Google's `gcloud` CLI if it is missing. |
-| 2 | user | Opens the link the agent shows and logs in with their Google account. |
+| 2 | user | Opens the link the agent shows and logs in with their Google account (`gcloud auth login --enable-gdrive-access`). |
 | 2b | user, new Cloud accounts only | Opens the Google Cloud console once and accepts the terms. |
-| 3 | agent | Creates a project for the user, enables the Drive and Sheets APIs, creates a robot (service) account and its key. |
-| 4 | agent | Shares the user's chosen folder with the robot. |
-| 5 | agent | Works through the API from then on: read files, edit sheet cells in place, create files, watch for changes. |
+| 3 | agent | Creates a project for the user and enables the Drive and Sheets APIs. |
+| 4 | agent | Works as the user from then on: create files and folders, read files, edit sheet cells in place, replace file contents, watch for changes. Every call names the user's project (`x-goog-user-project`) so it uses the user's own rate limits. |
+
+Everything the agent creates is owned by the user, in their own Drive.
 
 Written in Go: one binary per platform, official Google client libraries.
 
@@ -39,13 +40,11 @@ Written in Go: one binary per platform, official Google client libraries.
 
 - **New Cloud accounts must accept the Cloud terms once in the browser.** Creating a
   project from the CLI fails until they do.
-- **Robot accounts cannot create files in a personal Drive.** Service accounts created
-  after 15 April 2025 cannot own Drive items, even in a folder shared with them
+- **No robot (service) account.** Service accounts created after 15 April 2025 cannot
+  own Drive items, so they cannot create files in a personal Drive
   ([details](https://forum.rclone.org/t/google-drive-service-account-changes-and-rclone/50136)).
-  The fix drivekey plans to use: the login in step 2 also grants Drive access
-  (`gcloud auth login --enable-gdrive-access`), so new files are created as the user
-  and owned by them.
-- That login is powerful: it covers the user's Google Cloud and their whole Drive.
+  drivekey uses the user's own login for everything instead.
+- **The login is powerful:** it covers the user's Google Cloud and their whole Drive.
   drivekey has to store it carefully and say so plainly.
 
 ## Test results (2026-10-04, fresh personal Gmail account)
@@ -54,19 +53,18 @@ Written in Go: one binary per platform, official Google client libraries.
 |---|---|
 | Drive-enabled `gcloud` login from a link, no "app blocked" screen? | Yes. |
 | Project creation before accepting Cloud terms? | Fails: `Callers must accept Terms of Service`. One console visit needed. |
-| Robot key creation on a personal account? | Works; no org policy blocks it. |
+| Robot (service account) key creation on a personal account? | Works; no org policy blocks it. (Robot later dropped from the design.) |
 | User login creates folders, Sheets, uploads? | Yes, owned by the user. |
-| Robot edits Sheet cells in place? | Yes. |
-| Robot replaces contents of a user's file? | Yes. |
+| Robot edits Sheet cells / replaces file contents / sees later files? | Yes. |
 | Robot creates files (upload or empty Sheet) in the shared folder? | No: `storageQuotaExceeded`. It can create subfolders. |
-| Robot sees files the user adds later (changes feed)? | Yes. |
+| User login edits Sheet cells, replaces file contents, sees changes? | Yes. |
 | User calls counted against the user's own project? | Only when `x-goog-user-project` is set. Without it they count against `gcloud`'s shared project, which already returned 429 rate limits during the test. |
 
 Design consequences:
 
-- The robot does the routine work: reads, cell edits, content replacement, change watching.
-- File creation goes through the user's login, always with the user's project as quota project.
-- `gcloud` is only the login step; every API call drivekey makes names the user's project.
+- No robot: the user's login does everything, including creating files.
+- Every API call names the user's project as quota project.
+- `gcloud` is only used for login and project setup.
 
 ## License
 
