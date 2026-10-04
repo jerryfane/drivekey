@@ -162,6 +162,9 @@ func newTestApp(t *testing.T, g *fakeGoogle, out *strings.Builder) *App {
 	if err := dir.Ensure(); err != nil {
 		t.Fatal(err)
 	}
+	if err := dir.SaveConfig(state.Config{Account: "a@example.com", Project: "p", SetupComplete: true}); err != nil {
+		t.Fatal(err)
+	}
 	return &App{Dir: dir, Stdout: out, Stderr: &strings.Builder{}, Stdin: strings.NewReader(""),
 		clients: &gapi.Clients{Drive: d, Sheets: s, Project: "p"}}
 }

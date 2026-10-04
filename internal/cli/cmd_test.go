@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"google.golang.org/api/drive/v3"
 
 	"github.com/jerryfane/drivekey/internal/apperr"
+	"github.com/jerryfane/drivekey/internal/state"
 )
 
 func sheetGrid() [][]string {
@@ -219,5 +221,72 @@ func TestChangesReportsRemovalOfFileCreatedDuringSeeding(t *testing.T) {
 	}
 	if got := changeNames(t, out.String()); len(got) != 1 || got[0] != "late" {
 		t.Fatalf("changes = %v, want [late]", got)
+	}
+}
+
+// loginAs records account as the logged-in user, as `drivekey login` does.
+func loginAs(t *testing.T, a *App, account string) {
+	t.Helper()
+	if err := a.Dir.SaveConfig(state.Config{Account: account, Project: "p", SetupComplete: true}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChangesFeedNotRecreatedAfterLogout(t *testing.T) {
+	g := changesFixture(t)
+	a := newTestApp(t, g, &strings.Builder{})
+	loginAs(t, a, "a@example.com")
+	ctx := context.Background()
+	// A first poll is in flight (tracking not yet stored) when the user logs out.
+	p, err := pollChanges(ctx, a, "F", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Dir.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(a.Dir.ChangesFile()); !os.IsNotExist(err) {
+		t.Fatalf("change feed recreated after logout: %v", err)
+	}
+}
+
+func TestChangesResetWinsOverConcurrentPoll(t *testing.T) {
+	g := changesFixture(t)
+	var out strings.Builder
+	a := newTestApp(t, g, &out)
+	loginAs(t, a, "a@example.com")
+	ctx := context.Background()
+	if _, err := runChanges(ctx, a, []string{"--folder", "F"}); err != nil {
+		t.Fatal(err)
+	}
+	// A normal poll and a reset both read the same stored feed; the normal poll commits first.
+	normal, err := pollChanges(ctx, a, "F", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.addFile("fresh", "fresh.txt", "text/plain", "F") // only the reset's listing sees it
+	reset, err := pollChanges(ctx, a, "F", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := normal.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := reset.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// An old poll committing after the reset must not overwrite it either.
+	if err := normal.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	all, err := loadFeeds(a.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fd := all[feedKey("F")]; fd == nil || !fd.Known["fresh"] {
+		t.Fatalf("reset was lost: %+v", fd)
 	}
 }

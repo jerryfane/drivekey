@@ -81,7 +81,9 @@ Rules that keep the user's data safe:
   name. If they are missing or ambiguous it fails (`row_not_found`, `column_not_found`,
   `ambiguous_key`) rather than guessing. On `row_moved`, someone is editing: run it again.
 - Values are parsed like typed input (`=SUM(...)`, numbers, dates) unless you pass `--raw`.
-- The first `drivekey changes` call only starts tracking and returns nothing.
+- The first `drivekey changes` call only starts tracking and returns nothing. Changes are
+  reported at least once: if two `changes`/`watch` runs read the same feed at the same time,
+  both may report a change, so treat a change as "look at this file again", not as a counter.
 - Folder and file ids are the long strings in Drive URLs: `drive.google.com/drive/folders/<id>`,
   `docs.google.com/spreadsheets/d/<id>/edit`.
 

@@ -51,20 +51,26 @@ func TestForeignDirectoryIsNeverUsedOrDeleted(t *testing.T) {
 	if _, err := os.Stat(foreign); err != nil {
 		t.Fatalf("foreign file deleted: %v", err)
 	}
-	// A directory that happens to contain something named .drivekey that is not our marker file.
-	collide := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(collide, ".drivekey"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	other := filepath.Join(collide, "config.json")
-	if err := os.WriteFile(other, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := (Dir{Root: collide}).Clear(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(other); err != nil {
-		t.Fatalf("file in a non-drivekey directory deleted: %v", err)
+	// Directories that happen to contain something named .drivekey that is not our marker:
+	// a directory, and an unrelated regular file.
+	for name, mk := range map[string]func(string) error{
+		"dir":  func(p string) error { return os.MkdirAll(p, 0o755) },
+		"file": func(p string) error { return os.WriteFile(p, []byte("someone else's settings\n"), 0o600) },
+	} {
+		collide := t.TempDir()
+		if err := mk(filepath.Join(collide, ".drivekey")); err != nil {
+			t.Fatal(err)
+		}
+		other := filepath.Join(collide, "config.json")
+		if err := os.WriteFile(other, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Dir{Root: collide}).Clear(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(other); err != nil {
+			t.Fatalf("%s: file in a non-drivekey directory deleted: %v", name, err)
+		}
 	}
 }
 

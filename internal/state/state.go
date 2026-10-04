@@ -32,31 +32,42 @@ func Resolve(getenv func(string) string, home func() (string, error)) (Dir, erro
 func Default() (Dir, error) { return Resolve(os.Getenv, os.UserHomeDir) }
 
 // markerFile marks a directory as drivekey's own. drivekey refuses to use, and never
-// deletes, a non-empty directory without it, so a broad $DRIVEKEY_HOME (say, $HOME) is safe.
-const markerFile = ".drivekey"
+// deletes from, a non-empty directory without it, so a broad $DRIVEKEY_HOME (say, $HOME)
+// is safe. The marker must hold exactly markerContent, so an unrelated file that happens
+// to be named .drivekey does not count.
+const (
+	markerFile    = ".drivekey"
+	markerContent = "drivekey state directory v1\n"
+)
 
-// Ensure creates the directory tree with owner-only permissions. It fails if Root already
-// holds files but is not a drivekey state directory.
-func (d Dir) Ensure() error {
+// Claim makes Root a drivekey state directory: it creates Root (0700) and the marker if Root
+// is new or empty. It fails if Root already holds files but is not a drivekey state directory.
+func (d Dir) Claim() error {
 	if err := os.MkdirAll(d.Root, 0o700); err != nil {
 		return err
 	}
-	marker := filepath.Join(d.Root, markerFile)
-	if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
-		entries, err := os.ReadDir(d.Root)
-		if err != nil {
-			return err
-		}
-		if len(entries) > 0 {
-			return fmt.Errorf("%s is not empty and is not a drivekey state directory; set DRIVEKEY_HOME to an empty or new directory", d.Root)
-		}
-		if err := os.WriteFile(marker, []byte("drivekey state directory\n"), 0o600); err != nil {
-			return err
-		}
-	} else if err != nil {
+	if d.Owned() {
+		return os.Chmod(d.Root, 0o700)
+	}
+	entries, err := os.ReadDir(d.Root)
+	if err != nil {
 		return err
 	}
-	for _, p := range []string{d.Root, d.GcloudConfig(), d.LoginDir()} {
+	if len(entries) > 0 {
+		return fmt.Errorf("%s is not empty and is not a drivekey state directory; set DRIVEKEY_HOME to an empty or new directory", d.Root)
+	}
+	if err := os.Chmod(d.Root, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(d.Root, markerFile), []byte(markerContent), 0o600)
+}
+
+// Ensure claims Root and creates the subdirectories login needs, all with owner-only permissions.
+func (d Dir) Ensure() error {
+	if err := d.Claim(); err != nil {
+		return err
+	}
+	for _, p := range []string{d.GcloudConfig(), d.LoginDir()} {
 		if err := os.MkdirAll(p, 0o700); err != nil {
 			return err
 		}
@@ -67,10 +78,16 @@ func (d Dir) Ensure() error {
 	return nil
 }
 
-// Owned reports whether Root is a drivekey state directory: its marker is a regular file.
+// Owned reports whether Root is a drivekey state directory: its marker is a regular file
+// holding markerContent.
 func (d Dir) Owned() bool {
-	st, err := os.Lstat(filepath.Join(d.Root, markerFile))
-	return err == nil && st.Mode().IsRegular()
+	p := filepath.Join(d.Root, markerFile)
+	st, err := os.Lstat(p)
+	if err != nil || !st.Mode().IsRegular() || st.Size() != int64(len(markerContent)) {
+		return false
+	}
+	b, err := os.ReadFile(p)
+	return err == nil && string(b) == markerContent
 }
 
 // GcloudConfig is the private CLOUDSDK_CONFIG directory.

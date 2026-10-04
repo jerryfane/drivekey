@@ -22,7 +22,7 @@ func (d Dir) LockFile() string { return filepath.Join(d.Root, "lock") }
 // shared state (config, change feeds, the pending login) holds it for the whole
 // read-modify-write, so concurrent drivekey processes cannot overwrite each other.
 func (d Dir) Lock(ctx context.Context, timeout time.Duration) (*Lock, error) {
-	if err := d.Ensure(); err != nil {
+	if err := d.Claim(); err != nil {
 		return nil, err
 	}
 	f, err := os.OpenFile(d.LockFile(), os.O_CREATE|os.O_RDWR, 0o600)

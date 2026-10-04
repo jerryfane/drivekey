@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"time"
@@ -39,6 +41,11 @@ type Change struct {
 
 type feed struct {
 	Token string `json:"token"`
+	// Gen identifies one tracking session; it changes on every start or reset, so a poll that
+	// began before a reset can never overwrite the reset's position or membership.
+	Gen string `json:"gen"`
+	// Account is the Google account the feed belongs to.
+	Account string `json:"account"`
 	// Known holds ids seen inside the folder, so later permanent removals can be reported.
 	Known map[string]bool `json:"known,omitempty"`
 }
@@ -62,36 +69,67 @@ func loadFeeds(d state.Dir) (feeds, error) {
 }
 
 // poll is one read of a change feed. Commit stores the advanced position; call it only after
-// the changes have been delivered, so a failed write never loses them. Polling and
-// delivering need no lock; Commit takes the state lock and only advances the feed if nobody
-// else advanced it in the meantime, so a slow reader never blocks other commands.
+// the changes have been delivered, so a failed write never loses them.
+//
+// Polling and delivering hold no lock, so a slow reader never blocks other commands.
+// Delivery is therefore at-least-once: two readers of the same feed running at the same
+// time may both report a change. Commit takes the state lock and applies only if the feed
+// is still the one the poll read, for the same account (so nothing survives a logout).
 type poll struct {
 	Changes     []Change
 	Initialized bool
 	Commit      func(ctx context.Context) error
 }
 
-// commitFeed stores next under key, if the stored feed still has token from (or, for a new
-// feed, still does not exist).
-func commitFeed(ctx context.Context, a *App, key, from string, next *feed) error {
+// commitMode says when commitFeed may write.
+type commitMode int
+
+const (
+	advance commitMode = iota // only if the stored feed still has the read generation and token
+	start                     // only if no feed exists yet
+	restart                   // always: an explicit --reset replaces whatever is stored
+)
+
+// commitFeed stores next under key if mode allows it and the logged-in account is still
+// next.Account. read is the feed the poll started from (nil if none).
+func commitFeed(ctx context.Context, a *App, key string, read, next *feed, mode commitMode) error {
 	l, err := a.Dir.Lock(ctx, lockWait)
 	if err != nil {
 		return err
 	}
 	defer l.Unlock()
+	cfg, err := a.Dir.LoadConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Account == "" || cfg.Account != next.Account {
+		return nil // logged out or switched account since the poll began
+	}
 	all, err := loadFeeds(a.Dir)
 	if err != nil {
 		return err
 	}
-	cur := ""
-	if fd := all[key]; fd != nil {
-		cur = fd.Token
-	}
-	if cur != from {
-		return nil // another reader delivered and advanced this feed first
+	cur := all[key]
+	switch mode {
+	case start:
+		if cur != nil && cur.Account == next.Account {
+			return nil // another reader started this feed first
+		}
+	case advance:
+		if cur == nil || read == nil || cur.Gen != read.Gen || cur.Token != read.Token {
+			return nil // advanced, reset or removed by someone else
+		}
 	}
 	all[key] = next
 	return state.WriteJSON(a.Dir.ChangesFile(), all)
+}
+
+func newGen() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
 }
 
 // pollChanges returns changes since the stored position. With no stored position it starts
@@ -101,15 +139,18 @@ func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, 
 	if err != nil {
 		return poll{}, err
 	}
+	cfg, err := a.Dir.LoadConfig()
+	if err != nil {
+		return poll{}, err
+	}
 	all, err := loadFeeds(a.Dir)
 	if err != nil {
 		return poll{}, err
 	}
 	key := feedKey(folder)
 	fd := all[key]
-	from := ""
-	if fd != nil {
-		from = fd.Token
+	if fd != nil && fd.Account != cfg.Account {
+		fd = nil // belongs to another account
 	}
 	if fd == nil || fd.Token == "" || reset {
 		if folder != "" {
@@ -143,10 +184,16 @@ func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, 
 				known[id] = true
 			}
 		}
-		next := &feed{Token: st.StartPageToken, Known: known}
+		next := &feed{Token: st.StartPageToken, Gen: newGen(), Account: cfg.Account, Known: known}
+		mode := start
+		if reset {
+			mode = restart
+		}
+		read := fd
 		return poll{Changes: []Change{}, Initialized: true,
-			Commit: func(ctx context.Context) error { return commitFeed(ctx, a, key, from, next) }}, nil
+			Commit: func(ctx context.Context) error { return commitFeed(ctx, a, key, read, next, mode) }}, nil
 	}
+	read := &feed{Token: fd.Token, Gen: fd.Gen}
 	if fd.Known == nil {
 		fd.Known = map[string]bool{}
 	}
@@ -206,7 +253,7 @@ func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, 
 	}
 	return poll{Changes: out, Commit: func(ctx context.Context) error {
 		fd.Token = token
-		return commitFeed(ctx, a, key, from, fd)
+		return commitFeed(ctx, a, key, read, fd, advance)
 	}}, nil
 }
 
