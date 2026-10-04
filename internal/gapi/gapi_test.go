@@ -98,7 +98,8 @@ func TestTransportHeadersRetryAndRefresh(t *testing.T) {
 	var slept []time.Duration
 	hc := &http.Client{Transport: &Transport{Tokens: tokens, QuotaProject: "proj-1", MaxRetries: 5,
 		Sleep: func(d time.Duration) { slept = append(slept, d) }}}
-	resp, err := hc.Post(srv.URL, "text/plain", strings.NewReader("payload"))
+	req, _ := http.NewRequest(http.MethodPut, srv.URL, strings.NewReader("payload"))
+	resp, err := hc.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +117,28 @@ func TestTransportHeadersRetryAndRefresh(t *testing.T) {
 	}
 	if len(slept) != 2 {
 		t.Fatalf("slept %d times, want 2 (rate limit and 503; 401 retries immediately)", len(slept))
+	}
+}
+
+func TestTransportPostRetriesOnlyRejectedRequests(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			w.WriteHeader(http.StatusTooManyRequests) // rejected: safe to resend
+		default:
+			w.WriteHeader(http.StatusServiceUnavailable) // may have run: must not resend
+		}
+	}))
+	defer srv.Close()
+	hc := &http.Client{Transport: &Transport{Tokens: &fakeTokens{}, MaxRetries: 5, Sleep: func(time.Duration) {}}}
+	resp, err := hc.Post(srv.URL, "application/json", strings.NewReader(`{"name":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || calls.Load() != 2 {
+		t.Fatalf("status=%d calls=%d, want 503 after 2 calls", resp.StatusCode, calls.Load())
 	}
 }
 

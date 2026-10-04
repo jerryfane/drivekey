@@ -58,6 +58,24 @@ func (d Dir) ChangesFile() string { return filepath.Join(d.Root, "changes.json")
 
 func (d Dir) configFile() string { return filepath.Join(d.Root, "config.json") }
 
+// Remove deletes only the files and directories drivekey creates, then the root if it is
+// left empty. It never deletes anything else, so a broad $DRIVEKEY_HOME is safe.
+func (d Dir) Remove() error {
+	for _, p := range []string{d.GcloudConfig(), d.LoginDir(), d.TokenCache(), d.ChangesFile(), d.configFile()} {
+		if err := os.RemoveAll(p); err != nil {
+			return err
+		}
+	}
+	entries, err := os.ReadDir(d.Root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || len(entries) > 0 {
+		return err
+	}
+	return os.Remove(d.Root)
+}
+
 // Config is drivekey's persistent configuration.
 type Config struct {
 	Account string `json:"account,omitempty"`

@@ -38,6 +38,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		sleep = time.Sleep
 	}
 	replayable := req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
+	// A POST that failed in transit or with a 5xx may already have created a file or appended
+	// rows, so it is only retried when Google rejected it outright (401, rate limit).
+	idempotent := req.Method != http.MethodPost
 	refreshed := false
 	for attempt := 0; ; attempt++ {
 		r := req.Clone(req.Context())
@@ -58,7 +61,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		resp, err := base.RoundTrip(r)
 		if err != nil {
-			if replayable && attempt < t.MaxRetries && req.Context().Err() == nil {
+			if replayable && idempotent && attempt < t.MaxRetries && req.Context().Err() == nil {
 				sleep(backoff(attempt, ""))
 				continue
 			}
@@ -70,7 +73,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			refreshed = true
 			continue
 		}
-		if !replayable || attempt >= t.MaxRetries || !retryable(resp) {
+		if !replayable || attempt >= t.MaxRetries || !retryable(resp, idempotent) {
 			return resp, nil
 		}
 		retryAfter := resp.Header.Get("Retry-After")
@@ -79,12 +82,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 }
 
-// retryable reports whether resp is a transient failure. It may replace resp.Body.
-func retryable(resp *http.Response) bool {
+// retryable reports whether resp is a transient failure worth retrying. Server errors count
+// only for idempotent requests. It may replace resp.Body.
+func retryable(resp *http.Response, idempotent bool) bool {
 	switch resp.StatusCode {
-	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
-		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusTooManyRequests:
 		return true
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return idempotent
 	case http.StatusForbidden:
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 		resp.Body.Close()

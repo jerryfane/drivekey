@@ -145,7 +145,7 @@ func runLogout(ctx context.Context, a *App, args []string) (any, error) {
 			}
 		}
 	}
-	if err := os.RemoveAll(a.Dir.Root); err != nil {
+	if err := a.Dir.Remove(); err != nil {
 		return nil, err
 	}
 	out := map[string]any{"logged_out": true, "revoked": revoked, "state_deleted": a.Dir.Root}

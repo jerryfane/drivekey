@@ -29,6 +29,41 @@ func TestResolvePrecedence(t *testing.T) {
 	}
 }
 
+func TestRemoveKeepsForeignFiles(t *testing.T) {
+	root := t.TempDir()
+	d := Dir{Root: root}
+	if err := d.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveConfig(Config{Account: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(root, "notes.txt")
+	if err := os.WriteFile(foreign, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Fatalf("foreign file deleted: %v", err)
+	}
+	for _, p := range []string{d.GcloudConfig(), d.LoginDir(), filepath.Join(root, "config.json")} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s still exists", p)
+		}
+	}
+	// With only drivekey's own files, the root goes too.
+	d2 := Dir{Root: filepath.Join(t.TempDir(), "dk")}
+	_ = d2.Ensure()
+	if err := d2.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(d2.Root); !os.IsNotExist(err) {
+		t.Errorf("empty root kept")
+	}
+}
+
 func TestEnsureAndConfigArePrivate(t *testing.T) {
 	d := Dir{Root: filepath.Join(t.TempDir(), "dk")}
 	if err := os.MkdirAll(d.Root, 0o755); err != nil {
