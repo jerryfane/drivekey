@@ -79,9 +79,9 @@ Every command prints JSON. Errors go to stderr as `{"error": {"code", "message",
   drivekey uses the user's own login for everything instead.
 - **The login is powerful:** it covers the user's Google Cloud and their whole Drive.
   It is stored only in drivekey's private directory (mode 0700 on Linux and macOS; on
-  Windows it relies on the user profile's default permissions, so keep `DRIVEKEY_HOME`
-  inside your profile). Revoke it with `drivekey logout`, or at
-  https://myaccount.google.com/permissions ("Google Cloud SDK").
+  Windows it relies on the user profile's default permissions, so if you set
+  `DRIVEKEY_HOME` or `XDG_CONFIG_HOME`, keep it inside your profile). Revoke it with
+  `drivekey logout`, or at https://myaccount.google.com/permissions ("Google Cloud SDK").
 - **gcloud is required** for the login step (about 500 MB). It is the only way to log in
   without registering an app.
 
