@@ -48,15 +48,25 @@ Written in Go: one binary per platform, official Google client libraries.
 - That login is powerful: it covers the user's Google Cloud and their whole Drive.
   drivekey has to store it carefully and say so plainly.
 
-## Open questions being tested
+## Test results (2026-10-04, fresh personal Gmail account)
 
-1. Does a personal Gmail account get through the Drive-enabled `gcloud` login without
-   an "app blocked" screen?
-2. Can that login create files and edit Sheets cells directly?
-3. Are those API calls counted against the user's own project (own rate limits),
-   not against `gcloud`'s shared one?
-4. Can the robot account edit cells and replace file contents in a shared folder,
-   and does it see files added later?
+| Question | Result |
+|---|---|
+| Drive-enabled `gcloud` login from a link, no "app blocked" screen? | Yes. |
+| Project creation before accepting Cloud terms? | Fails: `Callers must accept Terms of Service`. One console visit needed. |
+| Robot key creation on a personal account? | Works; no org policy blocks it. |
+| User login creates folders, Sheets, uploads? | Yes, owned by the user. |
+| Robot edits Sheet cells in place? | Yes. |
+| Robot replaces contents of a user's file? | Yes. |
+| Robot creates files (upload or empty Sheet) in the shared folder? | No: `storageQuotaExceeded`. It can create subfolders. |
+| Robot sees files the user adds later (changes feed)? | Yes. |
+| User calls counted against the user's own project? | Only when `x-goog-user-project` is set. Without it they count against `gcloud`'s shared project, which already returned 429 rate limits during the test. |
+
+Design consequences:
+
+- The robot does the routine work: reads, cell edits, content replacement, change watching.
+- File creation goes through the user's login, always with the user's project as quota project.
+- `gcloud` is only the login step; every API call drivekey makes names the user's project.
 
 ## License
 
