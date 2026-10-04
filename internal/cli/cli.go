@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jerryfane/drivekey/internal/apperr"
 	"github.com/jerryfane/drivekey/internal/gapi"
@@ -37,8 +38,13 @@ type App struct {
 type command struct {
 	usage   string
 	summary string
-	run     func(ctx context.Context, a *App, args []string) (any, error)
+	// locked commands run while holding the state lock, because they read and rewrite shared state.
+	locked bool
+	run    func(ctx context.Context, a *App, args []string) (any, error)
 }
+
+// lockWait bounds how long a command waits for another drivekey command to finish.
+const lockWait = 5 * time.Minute
 
 var commands = map[string]command{}
 
@@ -85,6 +91,13 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	c, ok := commands[name]
 	if !ok {
 		return a.fail(apperr.Newf(apperr.Usage, "unknown command %q", name).WithHint("Run `drivekey help`."))
+	}
+	if c.locked {
+		l, err := a.Dir.Lock(ctx, lockWait)
+		if err != nil {
+			return a.fail(err)
+		}
+		defer l.Unlock()
 	}
 	out, err := c.run(ctx, a, rest)
 	if err != nil {

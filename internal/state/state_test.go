@@ -1,10 +1,12 @@
 package state
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestResolvePrecedence(t *testing.T) {
@@ -29,39 +31,74 @@ func TestResolvePrecedence(t *testing.T) {
 	}
 }
 
-func TestRemoveKeepsForeignFiles(t *testing.T) {
+func TestForeignDirectoryIsNeverUsedOrDeleted(t *testing.T) {
+	// A non-empty directory without the marker, e.g. DRIVEKEY_HOME=$HOME with its own gcloud dir.
 	root := t.TempDir()
+	foreign := filepath.Join(root, "gcloud", "foreign.txt")
+	if err := os.MkdirAll(filepath.Dir(foreign), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(foreign, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	d := Dir{Root: root}
+	if err := d.Ensure(); err == nil {
+		t.Fatal("Ensure must refuse a non-empty directory without the marker")
+	}
+	if err := d.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Purge(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Fatalf("foreign file deleted: %v", err)
+	}
+}
+
+func TestClearAndPurgeOwnDirectory(t *testing.T) {
+	d := Dir{Root: filepath.Join(t.TempDir(), "dk")}
 	if err := d.Ensure(); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.SaveConfig(Config{Account: "a"}); err != nil {
 		t.Fatal(err)
 	}
-	foreign := filepath.Join(root, "notes.txt")
-	if err := os.WriteFile(foreign, []byte("keep"), 0o600); err != nil {
+	l, err := d.Lock(context.Background(), time.Second)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Remove(); err != nil {
+	if err := d.Clear(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(foreign); err != nil {
-		t.Fatalf("foreign file deleted: %v", err)
+	if c, _ := d.LoadConfig(); c.Account != "" {
+		t.Fatal("config survived Clear")
 	}
-	for _, p := range []string{d.GcloudConfig(), d.LoginDir(), filepath.Join(root, "config.json")} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("%s still exists", p)
-		}
-	}
-	// With only drivekey's own files, the root goes too.
-	d2 := Dir{Root: filepath.Join(t.TempDir(), "dk")}
-	_ = d2.Ensure()
-	if err := d2.Remove(); err != nil {
+	l.Unlock()
+	if err := d.Purge(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(d2.Root); !os.IsNotExist(err) {
-		t.Errorf("empty root kept")
+	if _, err := os.Stat(d.Root); !os.IsNotExist(err) {
+		t.Fatalf("root kept: %v", err)
 	}
+}
+
+func TestLockExcludesOtherHolders(t *testing.T) {
+	d := Dir{Root: filepath.Join(t.TempDir(), "dk")}
+	ctx := context.Background()
+	l1, err := d.Lock(ctx, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Lock(ctx, 200*time.Millisecond); err == nil {
+		t.Fatal("second Lock succeeded while the first is held")
+	}
+	l1.Unlock()
+	l2, err := d.Lock(ctx, time.Second)
+	if err != nil {
+		t.Fatalf("Lock after Unlock: %v", err)
+	}
+	l2.Unlock()
 }
 
 func TestEnsureAndConfigArePrivate(t *testing.T) {

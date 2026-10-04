@@ -112,7 +112,9 @@ func lastLines(s string, n int) string {
 }
 
 // ExtractLoginURL pulls the accounts.google.com URL out of `gcloud auth login --no-launch-browser`
-// output. It tolerates the URL being wrapped across lines. Returns "" if not found yet.
+// output. It tolerates the URL being wrapped across lines. It returns "" until the text after
+// the URL (a blank line or the code prompt) has arrived, so a URL whose wrapped continuation
+// is still in flight is never returned cut short.
 func ExtractLoginURL(out string) string {
 	i := strings.Index(out, "https://accounts.google.com/")
 	if i < 0 {
@@ -125,8 +127,7 @@ func ExtractLoginURL(out string) string {
 			end = j
 		}
 	}
-	if end == len(rest) && !strings.Contains(rest, "\n") {
-		// URL line not finished yet.
+	if end == len(rest) {
 		return ""
 	}
 	return strings.Join(strings.Fields(rest[:end]), "")

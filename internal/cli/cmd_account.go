@@ -16,12 +16,14 @@ func init() {
 	register("login", command{
 		usage:   "login [--code CODE] [--interactive]",
 		summary: "Start a login (prints a URL), or finish it with the code Google shows.",
+		locked:  true,
 		run:     runLogin,
 	})
 	register("logout", command{usage: "logout", summary: "Revoke the login and delete local state.", run: runLogout})
 	register("setup", command{
 		usage:   "setup [--project ID]",
 		summary: "Create your own Google Cloud project and enable the Drive and Sheets APIs.",
+		locked:  true,
 		run:     runSetup,
 	})
 }
@@ -133,19 +135,32 @@ func runLogout(ctx context.Context, a *App, args []string) (any, error) {
 	if _, err := parseFlags(newFlags("logout"), args); err != nil {
 		return nil, err
 	}
-	cfg, err := a.Dir.LoadConfig()
+	if !a.Dir.Owned() {
+		return map[string]any{"logged_out": true, "revoked": false, "note": "no drivekey state at " + a.Dir.Root}, nil
+	}
+	l, err := a.Dir.Lock(ctx, lockWait)
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := a.Dir.LoadConfig()
+	if err != nil {
+		l.Unlock()
+		return nil, err
+	}
+	// A pending login helper would otherwise outlive its directory and could still finish a login.
+	login.Stop(a.Dir)
 	revoked := false
 	if r, err := a.gcloud(); err == nil {
-		if _, statErr := os.Stat(a.Dir.GcloudConfig()); statErr == nil {
-			if _, err := r.Run(ctx, "auth", "revoke", "--all"); err == nil {
-				revoked = true
-			}
+		if _, err := r.Run(ctx, "auth", "revoke", "--all"); err == nil {
+			revoked = true
 		}
 	}
-	if err := a.Dir.Remove(); err != nil {
+	err = a.Dir.Clear()
+	l.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Dir.Purge(); err != nil {
 		return nil, err
 	}
 	out := map[string]any{"logged_out": true, "revoked": revoked, "state_deleted": a.Dir.Root}
@@ -188,9 +203,13 @@ func runSetup(ctx context.Context, a *App, args []string) (any, error) {
 			if _, err := c.Drive.About.Get().Fields("user(emailAddress)").Context(ctx).Do(); err != nil {
 				return gapi.MapError(err)
 			}
-			// A missing spreadsheet answers 404 when the Sheets API is enabled.
+			// The Sheets API answers 404 for a missing spreadsheet once it is enabled; anything
+			// else (401, 403, 5xx) means Sheets is not usable yet.
 			_, err = c.Sheets.Spreadsheets.Get("drivekey-setup-probe").Fields("spreadsheetId").Context(ctx).Do()
-			if e := gapi.MapError(err); e != nil && e.Code == apperr.APIDisabled {
+			if e := gapi.MapError(err); e == nil || e.Code != apperr.NotFound {
+				if e == nil {
+					return apperr.New(apperr.GoogleAPI, "Sheets setup probe unexpectedly succeeded")
+				}
 				return e
 			}
 			return nil

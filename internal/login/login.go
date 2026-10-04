@@ -155,6 +155,9 @@ func Submit(ctx context.Context, d state.Dir, code string) (string, error) {
 		WithHint("Run `drivekey login` again.")
 }
 
+// Stop ends a pending login, if any: the helper and its gcloud process are killed.
+func Stop(d state.Dir) { stopHelper(files{d.LoginDir()}) }
+
 // Pending reports whether a helper is waiting for a code.
 func Pending(d state.Dir) bool {
 	f := files{d.LoginDir()}

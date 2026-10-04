@@ -46,11 +46,12 @@ type TokenSource struct {
 	cur cachedToken
 }
 
-// NewTokenSource returns a TokenSource backed by gcloud.
+// NewTokenSource returns a TokenSource backed by gcloud. The token is always requested for
+// account explicitly, never for whichever account happens to be active in gcloud.
 func NewTokenSource(r gcloud.Runner, d state.Dir, account string) *TokenSource {
 	return &TokenSource{
 		Fetch: func(ctx context.Context) (string, error) {
-			return r.Run(ctx, "auth", "print-access-token")
+			return r.Run(ctx, "auth", "print-access-token", account)
 		},
 		Lifetime:  tokenLifetime,
 		CachePath: d.TokenCache(),

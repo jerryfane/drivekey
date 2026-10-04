@@ -71,7 +71,7 @@ func (f *fakeTokens) Token(context.Context) (string, error) {
 }
 func (f *fakeTokens) Invalidate() { f.invalidated.Add(1) }
 
-func TestTransportHeadersRetryAndRefresh(t *testing.T) {
+func TestTransportWriteRetriesRejectedOnly(t *testing.T) {
 	var calls atomic.Int32
 	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +88,7 @@ func TestTransportHeadersRetryAndRefresh(t *testing.T) {
 			w.WriteHeader(http.StatusForbidden)
 			io.WriteString(w, `{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}`)
 		case 3:
-			w.WriteHeader(http.StatusServiceUnavailable)
+			w.WriteHeader(http.StatusTooManyRequests)
 		default:
 			io.WriteString(w, r.Header.Get("Authorization"))
 		}
@@ -116,29 +116,33 @@ func TestTransportHeadersRetryAndRefresh(t *testing.T) {
 		}
 	}
 	if len(slept) != 2 {
-		t.Fatalf("slept %d times, want 2 (rate limit and 503; 401 retries immediately)", len(slept))
+		t.Fatalf("slept %d times, want 2 (two rate limits; 401 retries immediately)", len(slept))
 	}
 }
 
-func TestTransportPostRetriesOnlyRejectedRequests(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch calls.Add(1) {
-		case 1:
-			w.WriteHeader(http.StatusTooManyRequests) // rejected: safe to resend
-		default:
-			w.WriteHeader(http.StatusServiceUnavailable) // may have run: must not resend
+func TestTransportServerErrorRetriedOnlyForReads(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if calls.Add(1) == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable) // may have been applied
+			}
+		}))
+		hc := &http.Client{Transport: &Transport{Tokens: &fakeTokens{}, MaxRetries: 5, Sleep: func(time.Duration) {}}}
+		req, _ := http.NewRequest(method, srv.URL, strings.NewReader("x"))
+		resp, err := hc.Do(req)
+		srv.Close()
+		if err != nil {
+			t.Fatal(err)
 		}
-	}))
-	defer srv.Close()
-	hc := &http.Client{Transport: &Transport{Tokens: &fakeTokens{}, MaxRetries: 5, Sleep: func(time.Duration) {}}}
-	resp, err := hc.Post(srv.URL, "application/json", strings.NewReader(`{"name":"x"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable || calls.Load() != 2 {
-		t.Fatalf("status=%d calls=%d, want 503 after 2 calls", resp.StatusCode, calls.Load())
+		resp.Body.Close()
+		want, wantCalls := http.StatusServiceUnavailable, int32(1)
+		if method == http.MethodGet {
+			want, wantCalls = http.StatusOK, 2
+		}
+		if resp.StatusCode != want || calls.Load() != wantCalls {
+			t.Errorf("%s: status=%d calls=%d, want %d after %d", method, resp.StatusCode, calls.Load(), want, wantCalls)
+		}
 	}
 }
 

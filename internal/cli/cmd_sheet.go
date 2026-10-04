@@ -369,41 +369,72 @@ func runSheetSet(ctx context.Context, a *App, args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	keyCell := fmt.Sprintf("%s!%s%d", qt, colLetters(ki), row+1)
 	target := fmt.Sprintf("%s!%s%d", qt, colLetters(ci), row+1)
 	previous := ""
 	if r := row - startRow; ci-startCol < len(vr.Values[r]) {
 		previous = fmt.Sprint(vr.Values[r][ci-startCol])
 	}
 
-	// Re-check the key right before and after writing: rows can move while we work.
-	checkKey := func() (bool, error) {
-		k, err := c.Sheets.Spreadsheets.Values.Get(id, keyCell).Context(ctx).Do()
-		if err != nil {
-			return false, err
-		}
-		return len(k.Values) == 1 && len(k.Values[0]) == 1 && cellString(k.Values[0][0]) == strings.TrimSpace(*key), nil
+	// The Sheets API has no conditional write, so re-read the cells that pin the target right
+	// before and after writing: the row's key and both column headers. Inserted or deleted rows
+	// or columns move at least one of them. When the key column itself is being set, its new
+	// value is not compared after the write.
+	g := guard{
+		{fmt.Sprintf("%s!%s%d", qt, colLetters(ki), *headerRow), *keyCol},
+		{fmt.Sprintf("%s!%s%d", qt, colLetters(ci), *headerRow), *col},
+		{fmt.Sprintf("%s!%s%d", qt, colLetters(ki), row+1), *key},
 	}
-	ok, err := checkKey()
+	after := g
+	if ki == ci {
+		after = g[:2]
+	}
+	ok, err := g.holds(ctx, c.Sheets, id)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, apperr.Newf(apperr.RowMoved, "row %d no longer has %s = %q; nothing was written", row+1, *keyCol, *key).
+		return nil, apperr.Newf(apperr.RowMoved, "the sheet changed while reading (row %d, %s = %q); nothing was written", row+1, *keyCol, *key).
 			WithHint("Someone is editing the sheet. Run the command again.")
 	}
 	if _, err := c.Sheets.Spreadsheets.Values.Update(id, target, &sheets.ValueRange{Values: [][]any{{*value}}}).
 		ValueInputOption(inputOption(*raw)).Context(ctx).Do(); err != nil {
 		return nil, err
 	}
-	ok, err = checkKey()
+	ok, err = after.holds(ctx, c.Sheets, id)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, apperr.Newf(apperr.RowMoved, "rows moved while writing: %s was set to %q but no longer belongs to %s = %q",
-			target, *value, *keyCol, *key).
-			WithHint(fmt.Sprintf("Check %s; restore it to %q if it now belongs to another row.", target, previous))
+		return nil, apperr.Newf(apperr.RowMoved, "the sheet changed while writing: %s was set to %q but may no longer be %s of the row with %s = %q",
+			target, *value, *col, *keyCol, *key).
+			WithHint(fmt.Sprintf("Check %s; restore it to %q if it now belongs to another row or column.", target, previous))
 	}
 	return map[string]any{"tab": *tabName, "row": row + 1, "column": *col, "cell": target, "previous": previous, "value": *value}, nil
+}
+
+// guard is a set of single cells that must still hold their expected values.
+type guard []struct{ cell, want string }
+
+func (g guard) holds(ctx context.Context, s *sheets.Service, id string) (bool, error) {
+	ranges := make([]string, len(g))
+	for i, c := range g {
+		ranges[i] = c.cell
+	}
+	resp, err := s.Spreadsheets.Values.BatchGet(id).Ranges(ranges...).Context(ctx).Do()
+	if err != nil {
+		return false, err
+	}
+	if len(resp.ValueRanges) != len(g) {
+		return false, nil
+	}
+	for i, vr := range resp.ValueRanges {
+		got := ""
+		if len(vr.Values) == 1 && len(vr.Values[0]) == 1 {
+			got = cellString(vr.Values[0][0])
+		}
+		if got != strings.TrimSpace(g[i].want) {
+			return false, nil
+		}
+	}
+	return true, nil
 }

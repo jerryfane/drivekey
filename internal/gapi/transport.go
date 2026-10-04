@@ -38,9 +38,10 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		sleep = time.Sleep
 	}
 	replayable := req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
-	// A POST that failed in transit or with a 5xx may already have created a file or appended
-	// rows, so it is only retried when Google rejected it outright (401, rate limit).
-	idempotent := req.Method != http.MethodPost
+	// A write that failed in transit or with a 5xx may already have been applied (a file
+	// created, contents replaced, rows appended); resending it could duplicate it or undo a
+	// later edit. Writes are only resent when Google rejected them outright (401, rate limit).
+	idempotent := req.Method == http.MethodGet || req.Method == http.MethodHead
 	refreshed := false
 	for attempt := 0; ; attempt++ {
 		r := req.Clone(req.Context())

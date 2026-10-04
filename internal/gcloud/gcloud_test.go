@@ -37,7 +37,13 @@ func TestExtractLoginURL(t *testing.T) {
 			t.Errorf("%s: got %q", name, got)
 		}
 	}
-	if got := ExtractLoginURL("Go to the following link:\n\n    https://accounts.google.com/o/oauth2/auth?a=1"); got != "" {
-		t.Errorf("partial line returned %q, want empty until the line is complete", got)
+	for _, partial := range []string{
+		"Go to the following link:\n\n    https://accounts.google.com/o/oauth2/auth?a=1",
+		// First wrapped segment and its newline arrived; the continuation has not.
+		"Go to the following link:\n\n    https://accounts.google.com/o/oauth2/auth?a=1&b\n",
+	} {
+		if got := ExtractLoginURL(partial); got != "" {
+			t.Errorf("partial output returned %q, want empty until the URL is complete", got)
+		}
 	}
 }

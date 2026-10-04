@@ -16,6 +16,7 @@ func init() {
 	register("changes", command{
 		usage:   "changes [--folder FOLDER_ID] [--peek] [--reset]",
 		summary: "List what changed since the last call (the first call only starts tracking).",
+		locked:  true,
 		run:     runChanges,
 	})
 	register("watch", command{
@@ -61,16 +62,25 @@ func loadFeeds(d state.Dir) (feeds, error) {
 	return f, err
 }
 
-// pollChanges returns changes since the stored token. With no stored token it starts tracking
-// and returns initialized=true. With save=false the token is not advanced.
-func pollChanges(ctx context.Context, a *App, folder string, save, reset bool) ([]Change, bool, error) {
+// poll is one read of a change feed. Commit stores the advanced position; call it only after
+// the changes have been delivered, so a failed write never loses them. The caller must hold
+// the state lock from poll until Commit.
+type poll struct {
+	Changes     []Change
+	Initialized bool
+	Commit      func() error
+}
+
+// pollChanges returns changes since the stored position. With no stored position it starts
+// tracking (recording the files already in the folder) and returns Initialized=true.
+func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, error) {
 	c, err := a.Clients(ctx)
 	if err != nil {
-		return nil, false, err
+		return poll{}, err
 	}
 	all, err := loadFeeds(a.Dir)
 	if err != nil {
-		return nil, false, err
+		return poll{}, err
 	}
 	key := feedKey(folder)
 	fd := all[key]
@@ -78,18 +88,27 @@ func pollChanges(ctx context.Context, a *App, folder string, save, reset bool) (
 		if folder != "" {
 			f, err := c.Drive.Files.Get(folder).Fields("id,mimeType").Context(ctx).Do()
 			if err != nil {
-				return nil, false, err
+				return poll{}, err
 			}
 			if f.MimeType != folderMime {
-				return nil, false, apperr.Newf(apperr.Usage, "%s is not a folder", folder)
+				return poll{}, apperr.Newf(apperr.Usage, "%s is not a folder", folder)
 			}
 		}
+		// Take the position first: anything that changes while the folder is listed is
+		// reported by the next call.
 		st, err := c.Drive.Changes.GetStartPageToken().Context(ctx).Do()
 		if err != nil {
-			return nil, false, err
+			return poll{}, err
 		}
-		all[key] = &feed{Token: st.StartPageToken, Known: map[string]bool{}}
-		return []Change{}, true, state.WriteJSON(a.Dir.ChangesFile(), all)
+		known := map[string]bool{}
+		if folder != "" {
+			if known, err = folderTree(ctx, c.Drive, folder); err != nil {
+				return poll{}, err
+			}
+		}
+		all[key] = &feed{Token: st.StartPageToken, Known: known}
+		return poll{Changes: []Change{}, Initialized: true,
+			Commit: func() error { return state.WriteJSON(a.Dir.ChangesFile(), all) }}, nil
 	}
 	if fd.Known == nil {
 		fd.Known = map[string]bool{}
@@ -104,7 +123,7 @@ func pollChanges(ctx context.Context, a *App, folder string, save, reset bool) (
 			Fields("nextPageToken,newStartPageToken,changes(fileId,removed,time,file(id,name,mimeType,modifiedTime,parents,trashed))").
 			Context(ctx).Do()
 		if err != nil {
-			return nil, false, err
+			return poll{}, err
 		}
 		for _, ch := range resp.Changes {
 			x := Change{FileID: ch.FileId, Removed: ch.Removed, Time: ch.Time}
@@ -121,7 +140,7 @@ func pollChanges(ctx context.Context, a *App, folder string, save, reset bool) (
 				default:
 					ok, err := in.contains(x.Parents)
 					if err != nil {
-						return nil, false, err
+						return poll{}, err
 					}
 					keep = ok
 					if ok {
@@ -148,13 +167,37 @@ func pollChanges(ctx context.Context, a *App, folder string, save, reset bool) (
 		}
 		token = resp.NextPageToken
 	}
-	if save {
+	return poll{Changes: out, Commit: func() error {
 		fd.Token = token
-		if err := state.WriteJSON(a.Dir.ChangesFile(), all); err != nil {
-			return nil, false, err
+		return state.WriteJSON(a.Dir.ChangesFile(), all)
+	}}, nil
+}
+
+// folderTree returns the ids of everything inside folder, at any depth.
+func folderTree(ctx context.Context, d *drive.Service, folder string) (map[string]bool, error) {
+	known := map[string]bool{}
+	queue := []string{folder}
+	for len(queue) > 0 {
+		parent := queue[0]
+		queue = queue[1:]
+		err := d.Files.List().Q(quoteQ(parent)+" in parents").PageSize(1000).
+			Fields("nextPageToken,files(id,mimeType)").Pages(ctx, func(l *drive.FileList) error {
+			for _, f := range l.Files {
+				if known[f.Id] {
+					continue
+				}
+				known[f.Id] = true
+				if f.MimeType == folderMime {
+					queue = append(queue, f.Id)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
 	}
-	return out, false, nil
+	return known, nil
 }
 
 // ancestry answers "is this file inside folder (at any depth)?" with memoised parent lookups.
@@ -222,17 +265,55 @@ func runChanges(ctx context.Context, a *App, args []string) (any, error) {
 	if err := positional(pos, 0, 0, usage); err != nil {
 		return nil, err
 	}
-	changes, initialized, err := pollChanges(ctx, a, *folder, !*peek, *reset)
+	p, err := pollChanges(ctx, a, *folder, *reset)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"changes": changes}
-	if initialized {
+	out := map[string]any{"changes": p.Changes}
+	if p.Initialized {
+		if *peek {
+			return nil, apperr.New(apperr.Usage, "nothing to peek at: this feed is not tracked yet").
+				WithHint("Run `drivekey changes` once without --peek to start tracking.")
+		}
 		out["initialized"] = true
 		out["note"] = "Tracking started. Changes from now on are reported by the next call."
 	}
-	return out, nil
+	// Print first and only then store the new position, so changes are never lost to a failed write.
+	if err := writeJSON(a.Stdout, out); err != nil {
+		return nil, err
+	}
+	if !*peek {
+		if err := p.Commit(); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
 }
+
+// watchOnce polls one feed under the state lock and commits only after every change was written.
+func watchOnce(ctx context.Context, a *App, folder string) error {
+	l, err := a.Dir.Lock(ctx, lockWait)
+	if err != nil {
+		return err
+	}
+	defer l.Unlock()
+	p, err := pollChanges(ctx, a, folder, false)
+	if err != nil {
+		return err
+	}
+	for _, ch := range p.Changes {
+		if err := writeCompactJSON(a.Stdout, ch); err != nil {
+			return &deliveryError{err}
+		}
+	}
+	return p.Commit()
+}
+
+// deliveryError means stdout is gone; watch stops instead of polling into the void.
+type deliveryError struct{ err error }
+
+func (e *deliveryError) Error() string { return "write changes: " + e.err.Error() }
+func (e *deliveryError) Unwrap() error { return e.err }
 
 func runWatch(ctx context.Context, a *App, args []string) (any, error) {
 	const usage = "watch [--folder FOLDER_ID] [--interval 60s]"
@@ -250,10 +331,13 @@ func runWatch(ctx context.Context, a *App, args []string) (any, error) {
 		return nil, apperr.New(apperr.Usage, "--interval must be at least 5s")
 	}
 	for {
-		changes, _, err := pollChanges(ctx, a, *folder, true, false)
-		if err != nil {
+		if err := watchOnce(ctx, a, *folder); err != nil {
 			if ctx.Err() != nil {
 				return nil, nil
+			}
+			var de *deliveryError
+			if errors.As(err, &de) {
+				return nil, err
 			}
 			e := apperr.As(mapErr(err))
 			switch e.Code {
@@ -261,11 +345,6 @@ func runWatch(ctx context.Context, a *App, args []string) (any, error) {
 				return nil, e
 			}
 			_ = writeCompactJSON(a.Stderr, map[string]any{"error": e})
-		}
-		for _, ch := range changes {
-			if err := writeCompactJSON(a.Stdout, ch); err != nil {
-				return nil, err
-			}
 		}
 		select {
 		case <-ctx.Done():

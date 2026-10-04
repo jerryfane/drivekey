@@ -31,8 +31,31 @@ func Resolve(getenv func(string) string, home func() (string, error)) (Dir, erro
 // Default resolves the state directory from the real environment.
 func Default() (Dir, error) { return Resolve(os.Getenv, os.UserHomeDir) }
 
-// Ensure creates the directory tree with owner-only permissions.
+// markerFile marks a directory as drivekey's own. drivekey refuses to use, and never
+// deletes, a non-empty directory without it, so a broad $DRIVEKEY_HOME (say, $HOME) is safe.
+const markerFile = ".drivekey"
+
+// Ensure creates the directory tree with owner-only permissions. It fails if Root already
+// holds files but is not a drivekey state directory.
 func (d Dir) Ensure() error {
+	if err := os.MkdirAll(d.Root, 0o700); err != nil {
+		return err
+	}
+	marker := filepath.Join(d.Root, markerFile)
+	if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
+		entries, err := os.ReadDir(d.Root)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return fmt.Errorf("%s is not empty and is not a drivekey state directory; set DRIVEKEY_HOME to an empty or new directory", d.Root)
+		}
+		if err := os.WriteFile(marker, []byte("drivekey state directory\n"), 0o600); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
 	for _, p := range []string{d.Root, d.GcloudConfig(), d.LoginDir()} {
 		if err := os.MkdirAll(p, 0o700); err != nil {
 			return err
@@ -42,6 +65,12 @@ func (d Dir) Ensure() error {
 		}
 	}
 	return nil
+}
+
+// Owned reports whether Root is a drivekey state directory.
+func (d Dir) Owned() bool {
+	_, err := os.Stat(filepath.Join(d.Root, markerFile))
+	return err == nil
 }
 
 // GcloudConfig is the private CLOUDSDK_CONFIG directory.
@@ -58,19 +87,42 @@ func (d Dir) ChangesFile() string { return filepath.Join(d.Root, "changes.json")
 
 func (d Dir) configFile() string { return filepath.Join(d.Root, "config.json") }
 
-// Remove deletes only the files and directories drivekey creates, then the root if it is
-// left empty. It never deletes anything else, so a broad $DRIVEKEY_HOME is safe.
-func (d Dir) Remove() error {
-	for _, p := range []string{d.GcloudConfig(), d.LoginDir(), d.TokenCache(), d.ChangesFile(), d.configFile()} {
-		if err := os.RemoveAll(p); err != nil {
+// Clear deletes drivekey's state but keeps the marker and the lock file, so it can run while
+// the lock is held. It does nothing if Root is not a drivekey state directory.
+func (d Dir) Clear() error {
+	if !d.Owned() {
+		return nil
+	}
+	entries, err := os.ReadDir(d.Root)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == markerFile || e.Name() == "lock" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(d.Root, e.Name())); err != nil {
 			return err
 		}
 	}
-	entries, err := os.ReadDir(d.Root)
-	if errors.Is(err, os.ErrNotExist) {
+	return nil
+}
+
+// Purge removes the lock file, the marker and Root after Clear, once the lock is released.
+// Root is kept if anything else appeared in it meanwhile.
+func (d Dir) Purge() error {
+	if !d.Owned() {
 		return nil
 	}
-	if err != nil || len(entries) > 0 {
+	_ = os.Remove(d.LockFile())
+	entries, err := os.ReadDir(d.Root)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 1 || entries[0].Name() != markerFile {
+		return nil
+	}
+	if err := os.Remove(filepath.Join(d.Root, markerFile)); err != nil {
 		return err
 	}
 	return os.Remove(d.Root)
