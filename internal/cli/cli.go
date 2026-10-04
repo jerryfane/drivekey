@@ -182,6 +182,9 @@ func (a *App) Clients(ctx context.Context) (*gapi.Clients, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Record whose login these clients act for, so state they produce is attributed to
+	// that login and not to whatever config says later.
+	c.Account, c.Session = cfg.Account, cfg.Session
 	a.clients = c
 	return c, nil
 }

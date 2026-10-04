@@ -224,18 +224,74 @@ func TestChangesReportsRemovalOfFileCreatedDuringSeeding(t *testing.T) {
 	}
 }
 
-// loginAs records account as the logged-in user, as `drivekey login` does.
-func loginAs(t *testing.T, a *App, account string) {
+// relogin simulates `drivekey login` completing for account in a new session, and a
+// later drivekey process whose clients act for that login.
+func relogin(t *testing.T, a *App, account, session string) {
 	t.Helper()
-	if err := a.Dir.SaveConfig(state.Config{Account: account, Project: "p", SetupComplete: true}); err != nil {
+	if err := a.Dir.SaveConfig(state.Config{Account: account, Session: session, Project: "p", SetupComplete: true}); err != nil {
 		t.Fatal(err)
+	}
+	c := *a.clients
+	c.Account, c.Session = account, session
+	a.clients = &c
+}
+
+func TestPreLogoutResetDoesNotOverwriteNewLogin(t *testing.T) {
+	g := changesFixture(t)
+	var out strings.Builder
+	a := newTestApp(t, g, &out)
+	ctx := context.Background()
+	if _, err := runChanges(ctx, a, []string{"--folder", "F"}); err != nil {
+		t.Fatal(err)
+	}
+	// A reset finishes polling, then stalls before committing while the user logs out
+	// and logs in again as the same account, and tracking starts afresh.
+	reset, err := pollChanges(ctx, a, "F", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Dir.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	relogin(t, a, "a@example.com", "s2")
+	if _, err := runChanges(ctx, a, []string{"--folder", "F"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reset.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	all, err := loadFeeds(a.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fd := all[feedKey("F")]; fd == nil || fd.Session != "s2" {
+		t.Fatalf("feed after stale reset = %+v, want the new login's feed", fd)
+	}
+}
+
+func TestFeedAttributedToClientsLogin(t *testing.T) {
+	g := changesFixture(t)
+	a := newTestApp(t, g, &strings.Builder{})
+	ctx := context.Background()
+	// This process's clients act for a@example.com; meanwhile another process logs in as b.
+	if err := a.Dir.SaveConfig(state.Config{Account: "b@example.com", Session: "s9", Project: "p", SetupComplete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runChanges(ctx, a, []string{"--folder", "F"}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := loadFeeds(a.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fd := all[feedKey("F")]; fd != nil {
+		t.Fatalf("a's poll stored a feed while b is logged in: %+v", fd)
 	}
 }
 
 func TestChangesFeedNotRecreatedAfterLogout(t *testing.T) {
 	g := changesFixture(t)
 	a := newTestApp(t, g, &strings.Builder{})
-	loginAs(t, a, "a@example.com")
 	ctx := context.Background()
 	// A first poll is in flight (tracking not yet stored) when the user logs out.
 	p, err := pollChanges(ctx, a, "F", false)
@@ -257,7 +313,6 @@ func TestChangesResetWinsOverConcurrentPoll(t *testing.T) {
 	g := changesFixture(t)
 	var out strings.Builder
 	a := newTestApp(t, g, &out)
-	loginAs(t, a, "a@example.com")
 	ctx := context.Background()
 	if _, err := runChanges(ctx, a, []string{"--folder", "F"}); err != nil {
 		t.Fatal(err)

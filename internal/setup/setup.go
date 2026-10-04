@@ -57,7 +57,7 @@ func Run(ctx context.Context, d state.Dir, r Runner, o Options) (Result, error) 
 		return Result{}, err
 	}
 	if cfg.Account != account {
-		cfg = state.Config{Account: account}
+		cfg = cfg.ForLogin(account)
 	}
 	switch {
 	case o.Project != "":

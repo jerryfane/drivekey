@@ -2,6 +2,8 @@
 package state
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -123,9 +125,30 @@ func (d Dir) Clear() error {
 // Config is drivekey's persistent configuration.
 type Config struct {
 	Account string `json:"account,omitempty"`
+	// Session changes on every login (and when setup adopts a different account), so state
+	// recorded under an earlier login, even of the same account, can be told apart.
+	Session string `json:"session,omitempty"`
 	Project string `json:"project,omitempty"`
 	// SetupComplete is true once the project exists and its APIs answer.
 	SetupComplete bool `json:"setup_complete"`
+}
+
+// ForLogin returns c updated for a completed login of account: a new session, and the
+// project kept only if the account is unchanged.
+func (c Config) ForLogin(account string) Config {
+	if c.Account != account {
+		c = Config{Account: account}
+	}
+	c.Session = newSession()
+	return c
+}
+
+func newSession() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
 }
 
 // LoadConfig reads config.json; a missing file yields an empty Config.

@@ -87,8 +87,20 @@ func TestTwoStepLogin(t *testing.T) {
 		t.Fatalf("account = %q", account)
 	}
 	cfg, err := d.LoadConfig()
-	if err != nil || cfg.Account != "user@example.com" {
+	if err != nil || cfg.Account != "user@example.com" || cfg.Session == "" {
 		t.Fatalf("config = %+v, %v", cfg, err)
+	}
+	// Logging in again as the same account starts a new session, so state recorded under
+	// the earlier login is never mistaken for the new one's.
+	if _, err := Start(ctx, d, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Submit(ctx, d, "good-code"); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := d.LoadConfig()
+	if again.Session == "" || again.Session == cfg.Session {
+		t.Fatalf("session after re-login = %q, before = %q", again.Session, cfg.Session)
 	}
 	if Pending(d) {
 		t.Fatal("login should no longer be pending")

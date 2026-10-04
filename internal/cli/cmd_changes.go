@@ -44,8 +44,10 @@ type feed struct {
 	// Gen identifies one tracking session; it changes on every start or reset, so a poll that
 	// began before a reset can never overwrite the reset's position or membership.
 	Gen string `json:"gen"`
-	// Account is the Google account the feed belongs to.
+	// Account and Session identify the login the feed was recorded under. A feed from any
+	// other login, even of the same account, is ignored and never overwritten by its polls.
 	Account string `json:"account"`
+	Session string `json:"session"`
 	// Known holds ids seen inside the folder, so later permanent removals can be reported.
 	Known map[string]bool `json:"known,omitempty"`
 }
@@ -90,8 +92,8 @@ const (
 	restart                   // always: an explicit --reset replaces whatever is stored
 )
 
-// commitFeed stores next under key if mode allows it and the logged-in account is still
-// next.Account. read is the feed the poll started from (nil if none).
+// commitFeed stores next under key if mode allows it and the current login is still the one
+// next was recorded under. read is the feed the poll started from (nil if none).
 func commitFeed(ctx context.Context, a *App, key string, read, next *feed, mode commitMode) error {
 	l, err := a.Dir.Lock(ctx, lockWait)
 	if err != nil {
@@ -102,17 +104,20 @@ func commitFeed(ctx context.Context, a *App, key string, read, next *feed, mode 
 	if err != nil {
 		return err
 	}
-	if cfg.Account == "" || cfg.Account != next.Account {
-		return nil // logged out or switched account since the poll began
+	if cfg.Account == "" || cfg.Account != next.Account || cfg.Session != next.Session {
+		return nil // logged out, or logged in again, since the poll began
 	}
 	all, err := loadFeeds(a.Dir)
 	if err != nil {
 		return err
 	}
 	cur := all[key]
+	if cur != nil && (cur.Account != cfg.Account || cur.Session != cfg.Session) {
+		cur = nil // left over from another login
+	}
 	switch mode {
 	case start:
-		if cur != nil && cur.Account == next.Account {
+		if cur != nil {
 			return nil // another reader started this feed first
 		}
 	case advance:
@@ -139,18 +144,16 @@ func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, 
 	if err != nil {
 		return poll{}, err
 	}
-	cfg, err := a.Dir.LoadConfig()
-	if err != nil {
-		return poll{}, err
-	}
+	// Attribute everything this poll records to the login its clients act for.
+	owner := feed{Account: c.Account, Session: c.Session}
 	all, err := loadFeeds(a.Dir)
 	if err != nil {
 		return poll{}, err
 	}
 	key := feedKey(folder)
 	fd := all[key]
-	if fd != nil && fd.Account != cfg.Account {
-		fd = nil // belongs to another account
+	if fd != nil && (fd.Account != owner.Account || fd.Session != owner.Session) {
+		fd = nil // recorded under another login
 	}
 	if fd == nil || fd.Token == "" || reset {
 		if folder != "" {
@@ -184,7 +187,7 @@ func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, 
 				known[id] = true
 			}
 		}
-		next := &feed{Token: st.StartPageToken, Gen: newGen(), Account: cfg.Account, Known: known}
+		next := &feed{Token: st.StartPageToken, Gen: newGen(), Account: owner.Account, Session: owner.Session, Known: known}
 		mode := start
 		if reset {
 			mode = restart

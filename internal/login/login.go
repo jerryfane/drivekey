@@ -128,10 +128,8 @@ func Submit(ctx context.Context, d state.Dir, code string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			if cfg.Account != res.Account {
-				// A different account invalidates the previous project choice.
-				cfg = state.Config{Account: res.Account}
-			}
+			// A new login starts a new session; a different account also drops the project.
+			cfg = cfg.ForLogin(res.Account)
 			if err := d.SaveConfig(cfg); err != nil {
 				return "", err
 			}
@@ -183,9 +181,7 @@ func Interactive(ctx context.Context, d state.Dir, r gcloud.Runner) (string, err
 	if err != nil {
 		return "", err
 	}
-	if cfg.Account != account {
-		cfg = state.Config{Account: account}
-	}
+	cfg = cfg.ForLogin(account)
 	_ = os.Remove(d.TokenCache())
 	return account, d.SaveConfig(cfg)
 }

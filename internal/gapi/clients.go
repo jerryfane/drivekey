@@ -19,6 +19,9 @@ type Clients struct {
 	Drive   *drive.Service
 	Sheets  *sheets.Service
 	Project string
+	// Account and Session identify the login the clients act for.
+	Account string
+	Session string
 }
 
 // New builds Drive and Sheets clients whose every call names project as quota project.
