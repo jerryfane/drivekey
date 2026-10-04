@@ -1,0 +1,162 @@
+package state
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+)
+
+func TestResolvePrecedence(t *testing.T) {
+	home := func() (string, error) { return "/home/u", nil }
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	cases := []struct {
+		vars map[string]string
+		want string
+	}{
+		{map[string]string{"DRIVEKEY_HOME": "/x", "XDG_CONFIG_HOME": "/xdg"}, "/x"},
+		{map[string]string{"XDG_CONFIG_HOME": "/xdg"}, filepath.Join("/xdg", "drivekey")},
+		{map[string]string{}, filepath.Join("/home/u", ".config", "drivekey")},
+	}
+	for _, c := range cases {
+		d, err := Resolve(env(c.vars), home)
+		if err != nil || d.Root != c.want {
+			t.Errorf("%v: got %q %v, want %q", c.vars, d.Root, err, c.want)
+		}
+	}
+	if _, err := Resolve(env(nil), func() (string, error) { return "", errors.New("no home") }); err == nil {
+		t.Error("missing home must fail")
+	}
+}
+
+func TestForeignDirectoryIsNeverUsedOrDeleted(t *testing.T) {
+	// A non-empty directory without the marker, e.g. DRIVEKEY_HOME=$HOME with its own gcloud dir.
+	root := t.TempDir()
+	foreign := filepath.Join(root, "gcloud", "foreign.txt")
+	if err := os.MkdirAll(filepath.Dir(foreign), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(foreign, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := Dir{Root: root}
+	if err := d.Ensure(); err == nil {
+		t.Fatal("Ensure must refuse a non-empty directory without the marker")
+	}
+	if err := d.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Fatalf("foreign file deleted: %v", err)
+	}
+	// Directories that happen to contain something named .drivekey that is not our marker:
+	// a directory, and an unrelated regular file.
+	for name, mk := range map[string]func(string) error{
+		"dir":  func(p string) error { return os.MkdirAll(p, 0o755) },
+		"file": func(p string) error { return os.WriteFile(p, []byte("someone else's settings\n"), 0o600) },
+	} {
+		collide := t.TempDir()
+		if err := mk(filepath.Join(collide, ".drivekey")); err != nil {
+			t.Fatal(err)
+		}
+		other := filepath.Join(collide, "config.json")
+		if err := os.WriteFile(other, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Dir{Root: collide}).Clear(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(other); err != nil {
+			t.Fatalf("%s: file in a non-drivekey directory deleted: %v", name, err)
+		}
+	}
+}
+
+func TestClearDeletesOnlyDrivekeyState(t *testing.T) {
+	d := Dir{Root: filepath.Join(t.TempDir(), "dk")}
+	if err := d.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveConfig(Config{Account: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	notes := filepath.Join(d.Root, "notes.txt") // put there by the user after setup
+	if err := os.WriteFile(notes, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l, err := d.Lock(context.Background(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	l.Unlock()
+	if c, _ := d.LoadConfig(); c.Account != "" {
+		t.Fatal("config survived Clear")
+	}
+	if _, err := os.Stat(d.GcloudConfig()); !os.IsNotExist(err) {
+		t.Fatal("gcloud login survived Clear")
+	}
+	if _, err := os.Stat(notes); err != nil {
+		t.Fatalf("user file deleted: %v", err)
+	}
+	// The lock file stays, so a command that opened it before Clear locks the same file as later ones.
+	if _, err := os.Stat(d.LockFile()); err != nil {
+		t.Fatalf("lock file removed: %v", err)
+	}
+}
+
+func TestLockExcludesOtherHolders(t *testing.T) {
+	d := Dir{Root: filepath.Join(t.TempDir(), "dk")}
+	ctx := context.Background()
+	l1, err := d.Lock(ctx, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Lock(ctx, 200*time.Millisecond); err == nil {
+		t.Fatal("second Lock succeeded while the first is held")
+	}
+	l1.Unlock()
+	l2, err := d.Lock(ctx, time.Second)
+	if err != nil {
+		t.Fatalf("Lock after Unlock: %v", err)
+	}
+	l2.Unlock()
+}
+
+func TestEnsureAndConfigArePrivate(t *testing.T) {
+	d := Dir{Root: filepath.Join(t.TempDir(), "dk")}
+	if err := os.MkdirAll(d.Root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	// Windows reports only a read-only bit in Go file modes; privacy there comes from the
+	// per-user profile directory's ACL, so the Unix permission checks do not apply.
+	unixPerms := runtime.GOOS != "windows"
+	for _, p := range []string{d.Root, d.GcloudConfig(), d.LoginDir()} {
+		st, err := os.Stat(p)
+		if err != nil || (unixPerms && st.Mode().Perm() != 0o700) {
+			t.Errorf("%s: mode %v err %v", p, st.Mode().Perm(), err)
+		}
+	}
+	if c, err := d.LoadConfig(); err != nil || c != (Config{}) {
+		t.Fatalf("missing config: %+v %v", c, err)
+	}
+	want := Config{Account: "a@b.c", Project: "p", SetupComplete: true}
+	if err := d.SaveConfig(want); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(filepath.Join(d.Root, "config.json"))
+	if unixPerms && st.Mode().Perm() != 0o600 {
+		t.Errorf("config mode %v", st.Mode().Perm())
+	}
+	if got, err := d.LoadConfig(); err != nil || got != want {
+		t.Fatalf("round trip %+v %v", got, err)
+	}
+}

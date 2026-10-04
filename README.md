@@ -4,8 +4,8 @@ Give your AI agent its own access to your Google Drive and Google Sheets.
 You open one link, log in with your Google account, and you are done.
 No clicking through the Google Cloud console, no app to register, nothing pre-configured.
 
-> **Status: design.** Nothing is implemented yet. This README is the plan; the
-> open questions below are being tested before any code is written.
+> **Status: early.** All commands work against a real personal Google account; no
+> release has been tagged yet. Build from source: `go build ./cmd/drivekey`.
 
 ## Why
 
@@ -22,19 +22,52 @@ console, a consent screen, a homepage URL and a privacy policy. Most people stop
 drivekey gives each user their **own** Google project, created for them by their agent,
 so they get their own rate limits and nothing depends on a shared app.
 
-## How it works (planned)
+## Quick start
+
+Agents: follow [AGENTS.md](AGENTS.md). It is the exact sequence, including error codes.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jerryfane/drivekey/main/install.sh | sh
+drivekey login                 # prints a URL; the user opens it, logs in, copies the code
+drivekey login --code CODE
+drivekey setup                 # creates the user's own Google Cloud project, enables Drive + Sheets
+drivekey ls                    # done
+```
 
 | Step | Who | What |
 |---|---|---|
-| 1 | agent | Installs Google's `gcloud` CLI if it is missing. |
-| 2 | user | Opens the link the agent shows and logs in with their Google account (`gcloud auth login --enable-gdrive-access`). |
-| 2b | user, new Cloud accounts only | Opens the Google Cloud console once and accepts the terms. |
-| 3 | agent | Creates a project for the user and enables the Drive and Sheets APIs. |
-| 4 | agent | Works as the user from then on: create files and folders, read files, edit sheet cells in place, replace file contents, watch for changes. Every call names the user's project (`x-goog-user-project`) so it uses the user's own rate limits. |
+| 1 | agent | Installs drivekey and Google's `gcloud` CLI. |
+| 2 | user | Opens the link the agent shows, logs in with their Google account, pastes back the code. |
+| 2b | user, new Cloud accounts only | Opens https://console.cloud.google.com once and accepts the terms. |
+| 3 | agent | `drivekey setup` creates a project for the user and enables the Drive and Sheets APIs. |
+| 4 | agent | Works as the user from then on. |
 
 Everything the agent creates is owned by the user, in their own Drive.
 
-Written in Go: one binary per platform, official Google client libraries.
+## Commands
+
+| Command | What it does |
+|---|---|
+| `ls`, `info`, `get`, `put`, `mkdir` | List, inspect, download (with `--export` for Google Docs files), upload or replace contents, create folders. |
+| `sheet create`, `sheet tabs`, `sheet read`, `sheet write`, `sheet append` | Work with Google Sheets cell by cell, never by re-uploading the whole file. |
+| `sheet set` | Set one cell, finding the row by a key column and the column by its header name. Refuses to guess. |
+| `changes`, `watch` | What changed since last time, optionally limited to one folder and everything inside it. |
+| `status`, `login`, `setup`, `logout` | Account management. |
+
+Every command prints JSON. Errors go to stderr as `{"error": {"code", "message", "hint"}}`.
+
+## How it works
+
+- **Login** is Google's own `gcloud auth login --enable-gdrive-access`, so drivekey never
+  registers or ships an OAuth client. drivekey keeps a private gcloud config
+  (`~/.config/drivekey/gcloud`, mode 0700) and never touches the user's own gcloud setup.
+  The login runs in a small background helper, so an agent can print the URL in one step
+  and hand over the code in the next.
+- **Own project:** every API call sends the user's project as quota project
+  (`x-goog-user-project`), so the user gets their own rate limits.
+- **Tokens:** drivekey asks gcloud for a short-lived access token and caches it until it
+  expires. It never reads gcloud's refresh token.
+- Written in Go with Google's official client libraries; one binary per platform.
 
 ## Known Google limits
 
@@ -45,7 +78,12 @@ Written in Go: one binary per platform, official Google client libraries.
   ([details](https://forum.rclone.org/t/google-drive-service-account-changes-and-rclone/50136)).
   drivekey uses the user's own login for everything instead.
 - **The login is powerful:** it covers the user's Google Cloud and their whole Drive.
-  drivekey has to store it carefully and say so plainly.
+  It is stored only in drivekey's private directory (mode 0700 on Linux and macOS; on
+  Windows it relies on the user profile's default permissions, so if you set
+  `DRIVEKEY_HOME` or `XDG_CONFIG_HOME`, keep it inside your profile). Revoke it with
+  `drivekey logout`, or at https://myaccount.google.com/permissions ("Google Cloud SDK").
+- **gcloud is required** for the login step (about 500 MB). It is the only way to log in
+  without registering an app.
 
 ## Test results (2026-10-04, fresh personal Gmail account)
 
