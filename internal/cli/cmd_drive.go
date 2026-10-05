@@ -308,13 +308,44 @@ func writeLocal(path string, r io.Reader) (int64, string, error) {
 	return n, hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// convertTargets maps upload content types to the Google format Drive converts them into.
+var convertTargets = map[string]string{
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "application/vnd.google-apps.spreadsheet",
+	"application/vnd.ms-excel":                       "application/vnd.google-apps.spreadsheet",
+	"application/vnd.oasis.opendocument.spreadsheet": "application/vnd.google-apps.spreadsheet",
+	"text/csv":                  "application/vnd.google-apps.spreadsheet",
+	"text/tab-separated-values": "application/vnd.google-apps.spreadsheet",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": "application/vnd.google-apps.document",
+	"application/msword":                      "application/vnd.google-apps.document",
+	"application/vnd.oasis.opendocument.text": "application/vnd.google-apps.document",
+	"application/rtf":                         "application/vnd.google-apps.document",
+	"text/plain":                              "application/vnd.google-apps.document",
+	"text/html":                               "application/vnd.google-apps.document",
+	"text/markdown":                           "application/vnd.google-apps.document",
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation": "application/vnd.google-apps.presentation",
+	"application/vnd.ms-powerpoint":                                             "application/vnd.google-apps.presentation",
+	"application/vnd.oasis.opendocument.presentation":                           "application/vnd.google-apps.presentation",
+}
+
+// convertTarget returns the Google format for content type ct (parameters such as
+// "; charset=utf-8" are ignored).
+func convertTarget(ct string) (string, error) {
+	base, _, _ := strings.Cut(ct, ";")
+	if t, ok := convertTargets[strings.TrimSpace(base)]; ok {
+		return t, nil
+	}
+	return "", apperr.Newf(apperr.Usage, "cannot convert %s into a Google Docs/Sheets/Slides file", ct).
+		WithHint("Convertible: spreadsheets (xlsx, xls, ods, csv, tsv), documents (docx, doc, odt, rtf, txt, html, md), presentations (pptx, ppt, odp).")
+}
+
 func runPut(ctx context.Context, a *App, args []string) (any, error) {
-	const usage = "put LOCAL_PATH [--parent FOLDER_ID] [--name NAME] [--replace FILE_ID] [--mime TYPE]"
+	const usage = "put LOCAL_PATH [--parent FOLDER_ID] [--name NAME] [--replace FILE_ID] [--mime TYPE] [--convert]"
 	fs := newFlags("put")
 	parent := fs.String("parent", "", "folder to create the file in (default: My Drive root)")
 	name := fs.String("name", "", "name in Drive (default: the local file name)")
 	replace := fs.String("replace", "", "replace this file's contents, keeping its id, sharing and links")
 	mimeType := fs.String("mime", "", "content type (default: from the file extension)")
+	convert := fs.Bool("convert", false, "create a Google Sheet/Doc/Slides file from the upload (xlsx, csv, docx, pptx, ...)")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return nil, err
@@ -324,6 +355,10 @@ func runPut(ctx context.Context, a *App, args []string) (any, error) {
 	}
 	if *replace != "" && *parent != "" {
 		return nil, apperr.New(apperr.Usage, "--replace and --parent cannot be combined")
+	}
+	if *replace != "" && *convert {
+		return nil, apperr.New(apperr.Usage, "--convert only applies to new files").
+			WithHint("Google files are edited in place, e.g. `drivekey sheet write`.")
 	}
 	local := pos[0]
 	fh, err := os.Open(local)
@@ -340,6 +375,12 @@ func runPut(ctx context.Context, a *App, args []string) (any, error) {
 	}
 	if ct == "" {
 		ct = "application/octet-stream"
+	}
+	target := ""
+	if *convert {
+		if target, err = convertTarget(ct); err != nil {
+			return nil, err
+		}
 	}
 	c, err := a.Clients(ctx)
 	if err != nil {
@@ -364,9 +405,12 @@ func runPut(ctx context.Context, a *App, args []string) (any, error) {
 			return nil, err
 		}
 	} else {
-		meta := &drive.File{Name: *name}
+		meta := &drive.File{Name: *name, MimeType: target}
 		if meta.Name == "" {
 			meta.Name = filepath.Base(local)
+			if *convert {
+				meta.Name = strings.TrimSuffix(meta.Name, filepath.Ext(meta.Name)) // "Roadmap.xlsx" -> "Roadmap"
+			}
 		}
 		if *parent != "" {
 			meta.Parents = []string{*parent}

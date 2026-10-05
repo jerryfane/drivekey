@@ -64,6 +64,7 @@ they get their own rate limits.
 | Replace a file's contents (same id and link) | `drivekey put ./file.pdf --replace FILE_ID` |
 | Create a folder | `drivekey mkdir NAME --parent FOLDER_ID` |
 | Create a Google Sheet | `drivekey sheet create NAME --parent FOLDER_ID` |
+| Create a Google Sheet/Doc/Slides from a file | `drivekey put ./Roadmap.xlsx --parent FOLDER_ID --convert` (xlsx, csv, docx, pptx, ...) |
 | List tabs | `drivekey sheet tabs SHEET_ID` |
 | Read cells | `drivekey sheet read SHEET_ID "'Tab'!A1:F50"` |
 | Write a range | `drivekey sheet write SHEET_ID "'Tab'!B2:C3" --values '[["a","b"],["c","d"]]'` |
