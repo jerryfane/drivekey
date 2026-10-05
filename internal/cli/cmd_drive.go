@@ -28,7 +28,7 @@ func init() {
 	register("ls", command{usage: "ls [FOLDER_ID] [--query Q] [--trashed]", summary: "List files (in a folder, or matching a Drive query).", run: runLs})
 	register("info", command{usage: "info FILE_ID", summary: "Show one file's metadata.", run: runInfo})
 	register("get", command{usage: "get FILE_ID [--out PATH|-] [--export FORMAT] [--force]", summary: "Download a file; Google Docs/Sheets/Slides need --export.", run: runGet})
-	register("put", command{usage: "put LOCAL_PATH [--parent FOLDER_ID] [--name NAME] [--replace FILE_ID] [--mime TYPE]", summary: "Upload a new file, or replace an existing file's contents.", run: runPut})
+	register("put", command{usage: "put LOCAL_PATH [--parent FOLDER_ID] [--name NAME] [--replace FILE_ID] [--mime TYPE] [--convert]", summary: "Upload a new file, or replace an existing file's contents; --convert makes a Google Sheet/Doc/Slides.", run: runPut})
 	register("mkdir", command{usage: "mkdir NAME [--parent FOLDER_ID]", summary: "Create a folder.", run: runMkdir})
 }
 
@@ -331,7 +331,7 @@ var convertTargets = map[string]string{
 // "; charset=utf-8" are ignored).
 func convertTarget(ct string) (string, error) {
 	base, _, _ := strings.Cut(ct, ";")
-	if t, ok := convertTargets[strings.TrimSpace(base)]; ok {
+	if t, ok := convertTargets[strings.ToLower(strings.TrimSpace(base))]; ok {
 		return t, nil
 	}
 	return "", apperr.Newf(apperr.Usage, "cannot convert %s into a Google Docs/Sheets/Slides file", ct).
@@ -408,8 +408,8 @@ func runPut(ctx context.Context, a *App, args []string) (any, error) {
 		meta := &drive.File{Name: *name, MimeType: target}
 		if meta.Name == "" {
 			meta.Name = filepath.Base(local)
-			if *convert {
-				meta.Name = strings.TrimSuffix(meta.Name, filepath.Ext(meta.Name)) // "Roadmap.xlsx" -> "Roadmap"
+			if stem := strings.TrimSuffix(meta.Name, filepath.Ext(meta.Name)); *convert && stem != "" {
+				meta.Name = stem // "Roadmap.xlsx" -> "Roadmap"; ".csv" stays ".csv"
 			}
 		}
 		if *parent != "" {
