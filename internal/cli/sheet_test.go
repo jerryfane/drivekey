@@ -106,6 +106,23 @@ func TestParseValues(t *testing.T) {
 	}
 }
 
+func TestConvertTarget(t *testing.T) {
+	cases := map[string]string{
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": spreadsheetMime,
+		"text/csv; charset=utf-8": spreadsheetMime,
+		"TEXT/CSV":                spreadsheetMime,
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document": "application/vnd.google-apps.document",
+	}
+	for ct, want := range cases {
+		if got, err := convertTarget(ct); err != nil || got != want {
+			t.Errorf("convertTarget(%q) = %q, %v; want %q", ct, got, err, want)
+		}
+	}
+	if _, err := convertTarget("application/pdf"); apperr.As(err).Code != apperr.Usage {
+		t.Errorf("pdf must not be convertible: %v", err)
+	}
+}
+
 func TestResolveExport(t *testing.T) {
 	allowed := []string{"application/pdf", "text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
 	m, ext, err := resolveExport("CSV", allowed)
