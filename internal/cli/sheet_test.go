@@ -110,6 +110,7 @@ func TestConvertTarget(t *testing.T) {
 	cases := map[string]string{
 		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": spreadsheetMime,
 		"text/csv; charset=utf-8": spreadsheetMime,
+		"TEXT/CSV":                spreadsheetMime,
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document": "application/vnd.google-apps.document",
 	}
 	for ct, want := range cases {
