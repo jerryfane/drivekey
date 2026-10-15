@@ -136,9 +136,13 @@ func commitFeed(ctx context.Context, a *App, c *gapi.Clients, key string, read, 
 		if err != nil {
 			return err
 		}
-		if p, ok := profiles[c.Profile]; ok {
-			account, session = p.Identity(), p.ID
+		p, ok := profiles[c.Profile]
+		if !ok || p.ID != next.Session {
+			// Unlike a logout, this cannot heal: the clients still use the old definition.
+			return apperr.Newf(apperr.ProfileNotFound, "relay profile %q was removed or redefined while this command ran; its position was not stored", c.Profile).
+				WithHint("Run the command again.")
 		}
+		account, session = p.Identity(), p.ID
 	} else {
 		cfg, err := a.Dir.LoadConfig()
 		if err != nil {
@@ -262,6 +266,18 @@ func pollChanges(ctx context.Context, a *App, target feedTarget, reset bool) (po
 	read := &feed{Token: fd.Token, Gen: fd.Gen}
 	if fd.Known == nil {
 		fd.Known = map[string]bool{}
+	}
+	// A folder moved between My Drive and a shared drive since tracking started has its
+	// changes in another change log; reading the old one would silently report nothing.
+	if folder != "" {
+		f, err := c.Drive.Files.Get(folder).Fields("id,driveId").SupportsAllDrives(true).Context(ctx).Do()
+		if err != nil {
+			return poll{}, err
+		}
+		if f.DriveId != fd.DriveID {
+			return poll{}, apperr.Newf(apperr.FeedResetRequired, "folder %s moved between My Drive and a shared drive since tracking started; changes since then may be missing", folder).
+				WithHint("Re-read the folder, then run `drivekey changes --folder " + folder + " --reset` to track it in its new place.")
+		}
 	}
 
 	in := newAncestry(ctx, c.Drive, folder)
@@ -505,7 +521,11 @@ func runWatch(ctx context.Context, a *App, args []string) (any, error) {
 			}
 			e := apperr.As(mapErr(err))
 			switch e.Code {
-			case apperr.NotLoggedIn, apperr.NotSetUp, apperr.Usage, apperr.NotFound, apperr.GcloudMissing:
+			case apperr.NotLoggedIn, apperr.NotSetUp, apperr.Usage, apperr.NotFound, apperr.GcloudMissing,
+				apperr.ProfileRequired, apperr.ProfileNotFound, apperr.RelayMode, apperr.RelayRouteRefused,
+				apperr.FeedResetRequired:
+				// Retrying cannot fix these. Relay denials and logins can be fixed by the
+				// owner while watch runs, so those are reported and retried.
 				return nil, e
 			}
 			_ = writeCompactJSON(a.Stderr, map[string]any{"error": e})

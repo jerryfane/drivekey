@@ -24,8 +24,9 @@ drivekey --profile personal status   # relay: "ok" and google_user = the account
 drivekey --profile personal ls       # every command takes --profile (or DRIVEKEY_PROFILE)
 ```
 
-Once any profile exists, every command needs `--profile NAME` (`--profile direct` = this
-machine's own login), or it fails with `profile_required`. Never guess a profile: ask which
+Once any profile exists, every Drive and Sheets command (and `login`, `setup`, `logout`)
+needs `--profile NAME` (`--profile direct` = this machine's own login), or it fails with
+`profile_required`; `status`, `profile ...`, `version` and `help` work without one. Never guess a profile: ask which
 account the user means. `login`, `setup` and `logout` fail with `relay_mode` for a profile,
 because the account is signed in on the Keyring host.
 
@@ -117,6 +118,7 @@ Rules that keep the user's data safe:
 | `rate_limited` | Google rate limit | wait and retry |
 | `export_required` | Google Docs file needs `--export` | pick a format from `hint` |
 | `row_not_found`, `column_not_found`, `ambiguous_key`, `ambiguous_column`, `row_moved` | `sheet set` could not safely find one cell | read the sheet and fix the arguments |
+| `feed_reset_required` | a tracked folder moved between My Drive and a shared drive | re-read the folder, then `drivekey changes --folder ID --reset` |
 | `profile_required` | relay profiles exist and you named none | pass `--profile NAME`; ask the user which account |
 | `profile_not_found` | no profile by that name | `drivekey profile list` |
 | `relay_mode` | login/setup/logout do nothing for a relay profile | the owner manages that account on the Keyring host |

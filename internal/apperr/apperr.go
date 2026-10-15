@@ -30,6 +30,7 @@ const (
 	AmbiguousColumn       = "ambiguous_column"
 	RowMoved              = "row_moved"
 	GoogleAPI             = "google_api_error"
+	FeedResetRequired     = "feed_reset_required"
 
 	// Relay mode (a named Keyring relay profile).
 	ProfileRequired    = "profile_required"

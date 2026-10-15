@@ -161,9 +161,12 @@ func relayStatus(ctx context.Context, a *App, name string, p state.Profile) rela
 	if err == nil {
 		var about *drive.About
 		about, err = c.Drive.About.Get().Fields("user(emailAddress)").Context(ctx).Do()
-		if err == nil && about.User != nil {
-			out.GoogleUser = about.User.EmailAddress
-			return out
+		if err == nil {
+			if about.User != nil && about.User.EmailAddress != "" {
+				out.GoogleUser = about.User.EmailAddress
+				return out
+			}
+			err = apperr.New(apperr.GoogleAPI, "Google answered through the relay but did not name the signed-in account")
 		}
 	}
 	out.Error = gapi.MapError(err)

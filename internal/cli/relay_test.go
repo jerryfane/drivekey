@@ -248,3 +248,20 @@ func TestStatusModes(t *testing.T) {
 		t.Fatalf("relay status = %v", m)
 	}
 }
+
+// A tracked folder that moves into a shared drive has its changes in that drive's log from
+// then on. Reading the old log would report nothing, so the poll must fail instead.
+func TestChangesFolderMovedToSharedDrive(t *testing.T) {
+	r := newRelayFor(t, "business")
+	a, _ := relayApp(t, r)
+	a.Profile = "business"
+	mustRun(t, a, "changes", "--folder", "F")
+	r.g.files["F"].DriveId = "SD"
+	r.g.addFile("new", "new.txt", "text/plain", "F")
+	r.g.files["new"].DriveId = "SD"
+	r.g.changes = []*drive.Change{{FileId: "new", Time: "t1", File: r.g.files["new"]}}
+	if _, e := run(a, "changes", "--folder", "F"); e == nil || e.Code != apperr.FeedResetRequired {
+		t.Fatalf("poll after move: %+v", e)
+	}
+	mustRun(t, a, "changes", "--folder", "F", "--reset")
+}

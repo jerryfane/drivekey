@@ -56,6 +56,8 @@ Everything the agent creates is owned by the user, in their own Drive.
 | `status`, `login`, `setup`, `logout` | Account management. |
 | `profile add`, `profile list`, `profile remove` | Relay profiles: use a Google account through the Keyring relay (see below). |
 
+Every command prints JSON. Errors go to stderr as `{"error": {"code", "message", "hint"}}`.
+
 ## How it works
 
 - **Login** is Google's own `gcloud auth login --enable-gdrive-access`, so drivekey never
