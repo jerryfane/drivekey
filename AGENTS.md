@@ -15,6 +15,21 @@ drivekey needs Google's `gcloud` CLI for the login step only. If `drivekey statu
 `gcloud_missing`, install it (`curl https://sdk.cloud.google.com | bash`, or see
 https://cloud.google.com/sdk/docs/install), or ask the user to.
 
+**Relay mode instead of steps 2 and 3:** if your machine runs a Keyring relay and the owner
+gave you a role for a Google account, skip `gcloud`, login and setup:
+
+```sh
+drivekey profile add personal --role ROLE --account personal   # once
+drivekey --profile personal status   # relay: "ok" and google_user = the account you reach
+drivekey --profile personal ls       # every command takes --profile (or DRIVEKEY_PROFILE)
+```
+
+Once any profile exists, every Drive and Sheets command (and `login`, `setup`, `logout`)
+needs `--profile NAME` (`--profile direct` = this machine's own login), or it fails with
+`profile_required`; `status`, `profile ...`, `version` and `help` work without one. Never guess a profile: ask which
+account the user means. `login`, `setup` and `logout` fail with `relay_mode` for a profile,
+because the account is signed in on the Keyring host.
+
 ## 2. Log in (needs the user once)
 
 ```sh
@@ -56,7 +71,8 @@ they get their own rate limits.
 
 | Task | Command |
 |---|---|
-| List a folder | `drivekey ls FOLDER_ID` (no id = whole Drive; `--query "name contains 'cv'"`) |
+| List a folder | `drivekey ls FOLDER_ID` (no id = whole Drive; `--query "name contains 'cv'"`; `--drive ID` = a shared drive) |
+| List shared drives | `drivekey drives` |
 | File details | `drivekey info FILE_ID` |
 | Download a file | `drivekey get FILE_ID --out DIR_OR_PATH` |
 | Download a Google Doc/Sheet/Slides | `drivekey get FILE_ID --export pdf` (or `xlsx`, `csv`, `docx`, ...) |
@@ -70,7 +86,7 @@ they get their own rate limits.
 | Write a range | `drivekey sheet write SHEET_ID "'Tab'!B2:C3" --values '[["a","b"],["c","d"]]'` |
 | Add rows | `drivekey sheet append SHEET_ID Tab --values '[["x","y"]]'` |
 | Set one cell by row key and column name | `drivekey sheet set SHEET_ID --tab Tab --key-col id --key 42 --col status --value done` |
-| What changed since last time | `drivekey changes --folder FOLDER_ID` |
+| What changed since last time | `drivekey changes --folder FOLDER_ID` (or `--drive SHARED_DRIVE_ID`) |
 | Stream changes | `drivekey watch --folder FOLDER_ID --interval 60s` |
 
 Rules that keep the user's data safe:
@@ -102,9 +118,21 @@ Rules that keep the user's data safe:
 | `rate_limited` | Google rate limit | wait and retry |
 | `export_required` | Google Docs file needs `--export` | pick a format from `hint` |
 | `row_not_found`, `column_not_found`, `ambiguous_key`, `ambiguous_column`, `row_moved` | `sheet set` could not safely find one cell | read the sheet and fix the arguments |
+| `feed_reset_required` | a tracked folder moved between My Drive and a shared drive | re-read the folder, then `drivekey changes --folder ID --reset` |
+| `profile_required` | relay profiles exist and you named none | pass `--profile NAME`; ask the user which account |
+| `profile_not_found` | no profile by that name | `drivekey profile list` |
+| `relay_mode` | login/setup/logout do nothing for a relay profile | the owner manages that account on the Keyring host |
+| `relay_unreachable` | the relay or the Keyring host is down | tell the user; never switch to another login |
+| `relay_denied` | Keyring refused the role (unknown, revoked, expired, not granted, daily limit) | tell the user; the owner fixes it in the Keyring dashboard |
+| `relay_login_required` | the account must be signed in again on the Keyring host | tell the user |
+| `relay_token_rejected` | Google rejected Keyring's token; the write was not applied | run the command again once |
+| `relay_route_refused` | a request would leave the profile's Keyring services | report it; do not work around it |
 
 ## Revoking access
 
 `drivekey logout` revokes the login and deletes local state. The user can also remove access
 at https://myaccount.google.com/permissions ("Google Cloud SDK"). The Cloud project is kept;
 delete it in the Cloud console if it is no longer needed.
+
+For a relay profile, `drivekey profile remove NAME` forgets the profile on this machine; the
+owner revokes the role itself in the Keyring dashboard.

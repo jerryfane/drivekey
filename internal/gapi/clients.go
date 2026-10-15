@@ -22,6 +22,8 @@ type Clients struct {
 	// Account and Session identify the login the clients act for.
 	Account string
 	Session string
+	// Profile names the relay profile the clients use; empty in direct mode.
+	Profile string
 }
 
 // New builds Drive and Sheets clients whose every call names project as quota project.

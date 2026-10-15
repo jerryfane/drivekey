@@ -21,11 +21,12 @@ const (
 	folderMime      = "application/vnd.google-apps.folder"
 	spreadsheetMime = "application/vnd.google-apps.spreadsheet"
 	googleAppsMime  = "application/vnd.google-apps."
-	fileFields      = "id,name,mimeType,modifiedTime,size,parents,webViewLink,trashed"
+	fileFields      = "id,name,mimeType,modifiedTime,size,parents,webViewLink,trashed,driveId"
 )
 
 func init() {
-	register("ls", command{usage: "ls [FOLDER_ID] [--query Q] [--trashed]", summary: "List files (in a folder, or matching a Drive query).", run: runLs})
+	register("ls", command{usage: "ls [FOLDER_ID] [--drive SHARED_DRIVE_ID] [--query Q] [--trashed]", summary: "List files (in a folder, a shared drive, or matching a Drive query).", run: runLs})
+	register("drives", command{usage: "drives", summary: "List the shared drives you are a member of.", run: runDrives})
 	register("info", command{usage: "info FILE_ID", summary: "Show one file's metadata.", run: runInfo})
 	register("get", command{usage: "get FILE_ID [--out PATH|-] [--export FORMAT] [--force]", summary: "Download a file; Google Docs/Sheets/Slides need --export.", run: runGet})
 	register("put", command{usage: "put LOCAL_PATH [--parent FOLDER_ID] [--name NAME] [--replace FILE_ID] [--mime TYPE] [--convert]", summary: "Upload a new file, or replace an existing file's contents; --convert makes a Google Sheet/Doc/Slides.", run: runPut})
@@ -42,11 +43,23 @@ type File struct {
 	Parents      []string `json:"parents,omitempty"`
 	WebViewLink  string   `json:"webViewLink,omitempty"`
 	Trashed      bool     `json:"trashed,omitempty"`
+	// DriveID is the shared drive the file is in; empty for My Drive.
+	DriveID string `json:"driveId,omitempty"`
 }
 
 func fileOf(f *drive.File) File {
 	return File{ID: f.Id, Name: f.Name, MimeType: f.MimeType, ModifiedTime: f.ModifiedTime, Size: f.Size,
-		Parents: f.Parents, WebViewLink: f.WebViewLink, Trashed: f.Trashed}
+		Parents: f.Parents, WebViewLink: f.WebViewLink, Trashed: f.Trashed, DriveID: f.DriveId}
+}
+
+// inDrive makes a file listing cover shared drives: only driveID's items, or with "" the
+// user's My Drive and the shared-drive items they can reach.
+func inDrive(call *drive.FilesListCall, driveID string) *drive.FilesListCall {
+	call = call.SupportsAllDrives(true).IncludeItemsFromAllDrives(true)
+	if driveID != "" {
+		return call.Corpora("drive").DriveId(driveID)
+	}
+	return call
 }
 
 // quoteQ escapes a value for a Drive query string literal.
@@ -55,8 +68,9 @@ func quoteQ(s string) string {
 }
 
 func runLs(ctx context.Context, a *App, args []string) (any, error) {
-	const usage = "ls [FOLDER_ID] [--query Q] [--trashed]"
+	const usage = "ls [FOLDER_ID] [--drive SHARED_DRIVE_ID] [--query Q] [--trashed]"
 	fs := newFlags("ls")
+	sharedDrive := fs.String("drive", "", "list inside this shared drive (with no FOLDER_ID: all of it)")
 	query := fs.String("query", "", "extra Drive query, e.g. \"name contains 'cv'\"")
 	trashed := fs.Bool("trashed", false, "include trashed files")
 	pos, err := parseFlags(fs, args)
@@ -80,8 +94,17 @@ func runLs(ctx context.Context, a *App, args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	driveID := *sharedDrive
+	if len(pos) == 1 && driveID == "" {
+		// A folder in a shared drive is listed within that drive.
+		f, err := c.Drive.Files.Get(pos[0]).Fields("id,driveId").SupportsAllDrives(true).Context(ctx).Do()
+		if err != nil {
+			return nil, err
+		}
+		driveID = f.DriveId
+	}
 	files := []File{}
-	call := c.Drive.Files.List().Q(strings.Join(parts, " and ")).PageSize(1000).
+	call := inDrive(c.Drive.Files.List().Q(strings.Join(parts, " and ")).PageSize(1000), driveID).
 		OrderBy("folder,name").Fields(googleapi.Field("nextPageToken,files(" + fileFields + ")"))
 	err = call.Pages(ctx, func(l *drive.FileList) error {
 		for _, f := range l.Files {
@@ -93,6 +116,37 @@ func runLs(ctx context.Context, a *App, args []string) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"files": files}, nil
+}
+
+// sharedDrive is drivekey's JSON view of a shared drive.
+type sharedDrive struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func runDrives(ctx context.Context, a *App, args []string) (any, error) {
+	pos, err := parseFlags(newFlags("drives"), args)
+	if err != nil {
+		return nil, err
+	}
+	if err := positional(pos, 0, 0, "drives"); err != nil {
+		return nil, err
+	}
+	c, err := a.Clients(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := []sharedDrive{}
+	err = c.Drive.Drives.List().PageSize(100).Fields("nextPageToken,drives(id,name)").Pages(ctx, func(l *drive.DriveList) error {
+		for _, d := range l.Drives {
+			out = append(out, sharedDrive{ID: d.Id, Name: d.Name})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"drives": out}, nil
 }
 
 func runInfo(ctx context.Context, a *App, args []string) (any, error) {
@@ -107,7 +161,7 @@ func runInfo(ctx context.Context, a *App, args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := c.Drive.Files.Get(pos[0]).Fields(fileFields).Context(ctx).Do()
+	f, err := c.Drive.Files.Get(pos[0]).Fields(fileFields).SupportsAllDrives(true).Context(ctx).Do()
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +280,7 @@ func runGet(ctx context.Context, a *App, args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := c.Drive.Files.Get(pos[0]).Fields(fileFields).Context(ctx).Do()
+	f, err := c.Drive.Files.Get(pos[0]).Fields(fileFields).SupportsAllDrives(true).Context(ctx).Do()
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +311,7 @@ func runGet(ctx context.Context, a *App, args []string) (any, error) {
 		if *export != "" {
 			return nil, apperr.New(apperr.UnsupportedExport, "--export only applies to Google Docs, Sheets and Slides")
 		}
-		resp, err := c.Drive.Files.Get(f.Id).Context(ctx).Download()
+		resp, err := c.Drive.Files.Get(f.Id).SupportsAllDrives(true).Context(ctx).Download()
 		if err != nil {
 			return nil, err
 		}
@@ -388,7 +442,7 @@ func runPut(ctx context.Context, a *App, args []string) (any, error) {
 	}
 	var f *drive.File
 	if *replace != "" {
-		cur, err := c.Drive.Files.Get(*replace).Fields("id,mimeType").Context(ctx).Do()
+		cur, err := c.Drive.Files.Get(*replace).Fields("id,mimeType").SupportsAllDrives(true).Context(ctx).Do()
 		if err != nil {
 			return nil, err
 		}
@@ -400,7 +454,7 @@ func runPut(ctx context.Context, a *App, args []string) (any, error) {
 		if *name != "" {
 			meta.Name = *name
 		}
-		f, err = c.Drive.Files.Update(*replace, meta).Media(fh, googleapi.ContentType(ct)).Fields(fileFields).Context(ctx).Do()
+		f, err = c.Drive.Files.Update(*replace, meta).Media(fh, googleapi.ContentType(ct)).Fields(fileFields).SupportsAllDrives(true).Context(ctx).Do()
 		if err != nil {
 			return nil, err
 		}
@@ -415,7 +469,7 @@ func runPut(ctx context.Context, a *App, args []string) (any, error) {
 		if *parent != "" {
 			meta.Parents = []string{*parent}
 		}
-		f, err = c.Drive.Files.Create(meta).Media(fh, googleapi.ContentType(ct)).Fields(fileFields).Context(ctx).Do()
+		f, err = c.Drive.Files.Create(meta).Media(fh, googleapi.ContentType(ct)).Fields(fileFields).SupportsAllDrives(true).Context(ctx).Do()
 		if err != nil {
 			return nil, err
 		}
@@ -442,7 +496,7 @@ func runMkdir(ctx context.Context, a *App, args []string) (any, error) {
 	if *parent != "" {
 		meta.Parents = []string{*parent}
 	}
-	f, err := c.Drive.Files.Create(meta).Fields(fileFields).Context(ctx).Do()
+	f, err := c.Drive.Files.Create(meta).Fields(fileFields).SupportsAllDrives(true).Context(ctx).Do()
 	if err != nil {
 		return nil, err
 	}

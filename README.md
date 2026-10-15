@@ -48,11 +48,13 @@ Everything the agent creates is owned by the user, in their own Drive.
 
 | Command | What it does |
 |---|---|
-| `ls`, `info`, `get`, `put`, `mkdir` | List, inspect, download (with `--export` for Google Docs files), upload or replace contents, create folders. |
+| `ls`, `info`, `get`, `put`, `mkdir` | List, inspect, download (with `--export` for Google Docs files), upload or replace contents, create folders. Files in shared drives work too (`ls --drive ID` lists a whole shared drive). |
+| `drives` | List the shared drives the account is a member of. |
 | `sheet create`, `sheet tabs`, `sheet read`, `sheet write`, `sheet append` | Work with Google Sheets cell by cell, never by re-uploading the whole file. |
 | `sheet set` | Set one cell, finding the row by a key column and the column by its header name. Refuses to guess. |
-| `changes`, `watch` | What changed since last time, optionally limited to one folder and everything inside it. |
+| `changes`, `watch` | What changed since last time, optionally limited to one folder and everything inside it, or one shared drive (`--drive ID`). |
 | `status`, `login`, `setup`, `logout` | Account management. |
+| `profile add`, `profile list`, `profile remove` | Relay profiles: use a Google account through the Keyring relay (see below). |
 
 Every command prints JSON. Errors go to stderr as `{"error": {"code", "message", "hint"}}`.
 
@@ -68,6 +70,44 @@ Every command prints JSON. Errors go to stderr as `{"error": {"code", "message",
 - **Tokens:** drivekey asks gcloud for a short-lived access token and caches it until it
   expires. It never reads gcloud's refresh token.
 - Written in Go with Google's official client libraries; one binary per platform.
+
+## Relay mode (Keyring)
+
+In relay mode the Google login never reaches the agent machine. It lives on the
+[Keyring](https://github.com/gitmoot/keyring) host, which adds a short-lived token to each
+call. The agent machine needs no `gcloud` and holds no Google credential; Keyring approves
+and revokes each agent role separately.
+
+```sh
+drivekey profile add personal --role agent-personal --account personal
+drivekey profile add business --role agent-business --account business
+drivekey --profile personal ls        # or DRIVEKEY_PROFILE=personal drivekey ls
+drivekey --profile business status    # relay health and which Google account answers
+```
+
+- A profile stores only the relay URL (default `http://127.0.0.1:7700`), the Keyring role and
+  the Keyring account name. Calls go to that role's services `google-<account>-drive`,
+  `google-<account>-upload` and `google-<account>-sheets`. The role's token stays in the
+  relay's own storage.
+- **Always explicit.** Once any profile exists, every account command needs `--profile NAME`
+  or `DRIVEKEY_PROFILE`; `--profile direct` uses this machine's own login. An unknown profile
+  is an error. drivekey never falls back from relay to a local login, or from one profile to
+  another.
+- Each profile keeps its own change-feed positions, so accounts never share a cursor.
+  Removing and re-adding a profile starts its feeds over.
+- `login`, `setup` and `logout` refuse for a relay profile (`relay_mode`): the account is
+  signed in on the Keyring host. `profile remove` deletes only the local profile; the owner
+  revokes the role in the Keyring dashboard.
+- Only Drive, Drive upload and Sheets API URLs are sent, each to the matching service of the
+  same profile. Upload sessions and redirects that point anywhere else are refused
+  (`relay_route_refused`).
+- Errors: `relay_unreachable` (relay or Keyring host down), `relay_denied` (role unknown,
+  revoked, expired, not granted, or over its daily limit), `relay_login_required` (the
+  account must be signed in again on the Keyring host), `relay_token_rejected` (Google
+  rejected the token on a write; nothing was applied; run it again).
+- The role needs these Keyring grants: Drive `GET`, `POST` on `/about`, `/files`, `/changes`,
+  `/drives`; upload `POST`, `PATCH` on `/files` (`PATCH` only for `put --replace`); Sheets
+  `GET`, `POST` on `/spreadsheets`.
 
 ## Known Google limits
 

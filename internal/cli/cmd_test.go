@@ -181,7 +181,7 @@ func TestStalledWatchDoesNotBlockOtherCommands(t *testing.T) {
 	g := changesFixture(t)
 	a := newTestApp(t, g, &strings.Builder{})
 	ctx := context.Background()
-	if err := watchOnce(ctx, a, "F"); err != nil { // starts tracking
+	if err := watchOnce(ctx, a, feedTarget{Folder: "F"}); err != nil { // starts tracking
 		t.Fatal(err)
 	}
 	g.addFile("new", "new.txt", "text/plain", "sub")
@@ -189,7 +189,7 @@ func TestStalledWatchDoesNotBlockOtherCommands(t *testing.T) {
 	release := make(chan struct{})
 	a.Stdout = blockingWriter{release}
 	done := make(chan error, 1)
-	go func() { done <- watchOnce(ctx, a, "F") }()
+	go func() { done <- watchOnce(ctx, a, feedTarget{Folder: "F"}) }()
 	time.Sleep(200 * time.Millisecond) // let watch reach the blocked write
 	l, err := a.Dir.Lock(ctx, 2*time.Second)
 	if err != nil {
@@ -246,7 +246,7 @@ func TestPreLogoutResetDoesNotOverwriteNewLogin(t *testing.T) {
 	}
 	// A reset finishes polling, then stalls before committing while the user logs out
 	// and logs in again as the same account, and tracking starts afresh.
-	reset, err := pollChanges(ctx, a, "F", true)
+	reset, err := pollChanges(ctx, a, feedTarget{Folder: "F"}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,11 +260,11 @@ func TestPreLogoutResetDoesNotOverwriteNewLogin(t *testing.T) {
 	if err := reset.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	all, err := loadFeeds(a.Dir)
+	all, err := loadFeeds(a.Dir.ChangesFile())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fd := all[feedKey("F")]; fd == nil || fd.Session != "s2" {
+	if fd := all[feedTarget{Folder: "F"}.key()]; fd == nil || fd.Session != "s2" {
 		t.Fatalf("feed after stale reset = %+v, want the new login's feed", fd)
 	}
 }
@@ -280,11 +280,11 @@ func TestFeedAttributedToClientsLogin(t *testing.T) {
 	if _, err := runChanges(ctx, a, []string{"--folder", "F"}); err != nil {
 		t.Fatal(err)
 	}
-	all, err := loadFeeds(a.Dir)
+	all, err := loadFeeds(a.Dir.ChangesFile())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fd := all[feedKey("F")]; fd != nil {
+	if fd := all[feedTarget{Folder: "F"}.key()]; fd != nil {
 		t.Fatalf("a's poll stored a feed while b is logged in: %+v", fd)
 	}
 }
@@ -294,7 +294,7 @@ func TestChangesFeedNotRecreatedAfterLogout(t *testing.T) {
 	a := newTestApp(t, g, &strings.Builder{})
 	ctx := context.Background()
 	// A first poll is in flight (tracking not yet stored) when the user logs out.
-	p, err := pollChanges(ctx, a, "F", false)
+	p, err := pollChanges(ctx, a, feedTarget{Folder: "F"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,12 +318,12 @@ func TestChangesResetWinsOverConcurrentPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A normal poll and a reset both read the same stored feed; the normal poll commits first.
-	normal, err := pollChanges(ctx, a, "F", false)
+	normal, err := pollChanges(ctx, a, feedTarget{Folder: "F"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	g.addFile("fresh", "fresh.txt", "text/plain", "F") // only the reset's listing sees it
-	reset, err := pollChanges(ctx, a, "F", true)
+	reset, err := pollChanges(ctx, a, feedTarget{Folder: "F"}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,11 +337,11 @@ func TestChangesResetWinsOverConcurrentPoll(t *testing.T) {
 	if err := normal.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	all, err := loadFeeds(a.Dir)
+	all, err := loadFeeds(a.Dir.ChangesFile())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fd := all[feedKey("F")]; fd == nil || !fd.Known["fresh"] {
+	if fd := all[feedTarget{Folder: "F"}.key()]; fd == nil || !fd.Known["fresh"] {
 		t.Fatalf("reset was lost: %+v", fd)
 	}
 }
