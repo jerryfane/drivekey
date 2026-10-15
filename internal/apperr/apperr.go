@@ -30,6 +30,17 @@ const (
 	AmbiguousColumn       = "ambiguous_column"
 	RowMoved              = "row_moved"
 	GoogleAPI             = "google_api_error"
+
+	// Relay mode (a named Keyring relay profile).
+	ProfileRequired    = "profile_required"
+	ProfileNotFound    = "profile_not_found"
+	RelayMode          = "relay_mode"
+	RelayUnreachable   = "relay_unreachable"
+	RelayDenied        = "relay_denied"
+	RelayLoginRequired = "relay_login_required"
+	RelayTokenRejected = "relay_token_rejected"
+	RelayRouteRefused  = "relay_route_refused"
+	RelayError         = "relay_error"
 )
 
 // Error is an error with a stable code, a message and an optional hint for the next step.

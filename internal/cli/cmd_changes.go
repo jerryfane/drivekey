@@ -11,17 +11,18 @@ import (
 	"google.golang.org/api/drive/v3"
 
 	"github.com/jerryfane/drivekey/internal/apperr"
+	"github.com/jerryfane/drivekey/internal/gapi"
 	"github.com/jerryfane/drivekey/internal/state"
 )
 
 func init() {
 	register("changes", command{
-		usage:   "changes [--folder FOLDER_ID] [--peek] [--reset]",
+		usage:   "changes [--folder FOLDER_ID | --drive SHARED_DRIVE_ID] [--peek] [--reset]",
 		summary: "List what changed since the last call (the first call only starts tracking).",
 		run:     runChanges,
 	})
 	register("watch", command{
-		usage:   "watch [--folder FOLDER_ID] [--interval 60s]",
+		usage:   "watch [--folder FOLDER_ID | --drive SHARED_DRIVE_ID] [--interval 60s]",
 		summary: "Poll for changes and print one JSON line per change.",
 		run:     runWatch,
 	})
@@ -39,6 +40,7 @@ type Change struct {
 	Time         string   `json:"time"`
 }
 
+// feed is one stored change-feed position.
 type feed struct {
 	Token string `json:"token"`
 	// Gen identifies one tracking session; it changes on every start or reset, so a poll that
@@ -46,24 +48,51 @@ type feed struct {
 	Gen string `json:"gen"`
 	// Account and Session identify the login the feed was recorded under. A feed from any
 	// other login, even of the same account, is ignored and never overwritten by its polls.
+	// For a relay profile they are its relay/role/service identity and its profile id.
 	Account string `json:"account"`
 	Session string `json:"session"`
+	// DriveID is set when the feed reads a shared drive's own change log.
+	DriveID string `json:"driveId,omitempty"`
 	// Known holds ids seen inside the folder, so later permanent removals can be reported.
 	Known map[string]bool `json:"known,omitempty"`
 }
 
 type feeds map[string]*feed
 
-func feedKey(folder string) string {
-	if folder == "" {
-		return "all"
+// feedTarget is what a feed follows: a folder (at any depth), a whole shared drive, or,
+// with both empty, everything the account's own change log reports.
+type feedTarget struct{ Folder, Drive string }
+
+func (t feedTarget) key() string {
+	switch {
+	case t.Folder != "":
+		return "folder:" + t.Folder
+	case t.Drive != "":
+		return "drive:" + t.Drive
 	}
-	return "folder:" + folder
+	return "all"
 }
 
-func loadFeeds(d state.Dir) (feeds, error) {
+func newFeedTarget(folder, sharedDrive string) (feedTarget, error) {
+	if folder != "" && sharedDrive != "" {
+		return feedTarget{}, apperr.New(apperr.Usage, "use --folder or --drive, not both").
+			WithHint("A folder inside a shared drive is tracked through that drive's change log automatically.")
+	}
+	return feedTarget{Folder: folder, Drive: sharedDrive}, nil
+}
+
+// feedsFile is where the feeds of the clients' login are stored: relay profiles keep their
+// own file, so no two accounts or relay routes ever share a position.
+func feedsFile(d state.Dir, c *gapi.Clients) string {
+	if c.Profile != "" {
+		return d.ProfileChangesFile(c.Profile)
+	}
+	return d.ChangesFile()
+}
+
+func loadFeeds(path string) (feeds, error) {
 	f := feeds{}
-	err := state.ReadJSON(d.ChangesFile(), &f)
+	err := state.ReadJSON(path, &f)
 	if errors.Is(err, os.ErrNotExist) {
 		return feeds{}, nil
 	}
@@ -92,27 +121,41 @@ const (
 	restart                   // always: an explicit --reset replaces whatever is stored
 )
 
-// commitFeed stores next under key if mode allows it and the current login is still the one
-// next was recorded under. read is the feed the poll started from (nil if none).
-func commitFeed(ctx context.Context, a *App, key string, read, next *feed, mode commitMode) error {
+// commitFeed stores next under key if mode allows it and the login the clients act for is
+// still current: the same direct login, or the same relay profile definition. read is the
+// feed the poll started from (nil if none).
+func commitFeed(ctx context.Context, a *App, c *gapi.Clients, key string, read, next *feed, mode commitMode) error {
 	l, err := a.Dir.Lock(ctx, lockWait)
 	if err != nil {
 		return err
 	}
 	defer l.Unlock()
-	cfg, err := a.Dir.LoadConfig()
-	if err != nil {
-		return err
+	account, session := "", ""
+	if c.Profile != "" {
+		profiles, err := a.Dir.LoadProfiles()
+		if err != nil {
+			return err
+		}
+		if p, ok := profiles[c.Profile]; ok {
+			account, session = p.Identity(), p.ID
+		}
+	} else {
+		cfg, err := a.Dir.LoadConfig()
+		if err != nil {
+			return err
+		}
+		account, session = cfg.Account, cfg.Session
 	}
-	if cfg.Account == "" || cfg.Account != next.Account || cfg.Session != next.Session {
-		return nil // logged out, or logged in again, since the poll began
+	if account == "" || account != next.Account || session != next.Session {
+		return nil // logged out or in again, or the profile was removed or redefined, since the poll began
 	}
-	all, err := loadFeeds(a.Dir)
+	path := feedsFile(a.Dir, c)
+	all, err := loadFeeds(path)
 	if err != nil {
 		return err
 	}
 	cur := all[key]
-	if cur != nil && (cur.Account != cfg.Account || cur.Session != cfg.Session) {
+	if cur != nil && (cur.Account != account || cur.Session != session) {
 		cur = nil // left over from another login
 	}
 	switch mode {
@@ -126,7 +169,12 @@ func commitFeed(ctx context.Context, a *App, key string, read, next *feed, mode 
 		}
 	}
 	all[key] = next
-	return state.WriteJSON(a.Dir.ChangesFile(), all)
+	if c.Profile != "" {
+		if err := a.Dir.EnsureProfileDir(c.Profile); err != nil {
+			return err
+		}
+	}
+	return state.WriteJSON(path, all)
 }
 
 func newGen() string {
@@ -139,30 +187,40 @@ func newGen() string {
 
 // pollChanges returns changes since the stored position. With no stored position it starts
 // tracking (recording the files already in the folder) and returns Initialized=true.
-func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, error) {
+//
+// A folder inside a shared drive, and a whole shared drive, are read from that drive's own
+// change log: Google does not reliably report a member's shared-drive items in the user log.
+func pollChanges(ctx context.Context, a *App, target feedTarget, reset bool) (poll, error) {
 	c, err := a.Clients(ctx)
 	if err != nil {
 		return poll{}, err
 	}
+	folder := target.Folder
 	// Attribute everything this poll records to the login its clients act for.
 	owner := feed{Account: c.Account, Session: c.Session}
-	all, err := loadFeeds(a.Dir)
+	all, err := loadFeeds(feedsFile(a.Dir, c))
 	if err != nil {
 		return poll{}, err
 	}
-	key := feedKey(folder)
+	key := target.key()
 	fd := all[key]
 	if fd != nil && (fd.Account != owner.Account || fd.Session != owner.Session) {
 		fd = nil // recorded under another login
 	}
 	if fd == nil || fd.Token == "" || reset {
+		driveID := target.Drive
 		if folder != "" {
-			f, err := c.Drive.Files.Get(folder).Fields("id,mimeType").Context(ctx).Do()
+			f, err := c.Drive.Files.Get(folder).Fields("id,mimeType,driveId").SupportsAllDrives(true).Context(ctx).Do()
 			if err != nil {
 				return poll{}, err
 			}
 			if f.MimeType != folderMime {
 				return poll{}, apperr.Newf(apperr.Usage, "%s is not a folder", folder)
+			}
+			driveID = f.DriveId
+		} else if driveID != "" {
+			if _, err := c.Drive.Drives.Get(driveID).Fields("id").Context(ctx).Do(); err != nil {
+				return poll{}, err
 			}
 		}
 		// Folder membership is listed before and after taking the position. A file deleted
@@ -170,16 +228,20 @@ func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, 
 		// it is in the second. Either way its later removal is recognised.
 		known := map[string]bool{}
 		if folder != "" {
-			if known, err = folderTree(ctx, c.Drive, folder); err != nil {
+			if known, err = folderTree(ctx, c.Drive, folder, driveID); err != nil {
 				return poll{}, err
 			}
 		}
-		st, err := c.Drive.Changes.GetStartPageToken().Context(ctx).Do()
+		stc := c.Drive.Changes.GetStartPageToken().SupportsAllDrives(true)
+		if driveID != "" {
+			stc = stc.DriveId(driveID)
+		}
+		st, err := stc.Context(ctx).Do()
 		if err != nil {
 			return poll{}, err
 		}
 		if folder != "" {
-			again, err := folderTree(ctx, c.Drive, folder)
+			again, err := folderTree(ctx, c.Drive, folder, driveID)
 			if err != nil {
 				return poll{}, err
 			}
@@ -187,14 +249,15 @@ func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, 
 				known[id] = true
 			}
 		}
-		next := &feed{Token: st.StartPageToken, Gen: newGen(), Account: owner.Account, Session: owner.Session, Known: known}
+		next := &feed{Token: st.StartPageToken, Gen: newGen(), Account: owner.Account, Session: owner.Session,
+			DriveID: driveID, Known: known}
 		mode := start
 		if reset {
 			mode = restart
 		}
 		read := fd
 		return poll{Changes: []Change{}, Initialized: true,
-			Commit: func(ctx context.Context) error { return commitFeed(ctx, a, key, read, next, mode) }}, nil
+			Commit: func(ctx context.Context) error { return commitFeed(ctx, a, c, key, read, next, mode) }}, nil
 	}
 	read := &feed{Token: fd.Token, Gen: fd.Gen}
 	if fd.Known == nil {
@@ -206,13 +269,20 @@ func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, 
 	out := []Change{}
 	token := fd.Token
 	for {
-		resp, err := c.Drive.Changes.List(token).IncludeRemoved(true).PageSize(1000).Spaces("drive").
-			Fields("nextPageToken,newStartPageToken,changes(fileId,removed,time,file(id,name,mimeType,modifiedTime,parents,trashed))").
+		call := c.Drive.Changes.List(token).IncludeRemoved(true).PageSize(1000).Spaces("drive").
+			SupportsAllDrives(true).IncludeItemsFromAllDrives(true)
+		if fd.DriveID != "" {
+			call = call.DriveId(fd.DriveID)
+		}
+		resp, err := call.Fields("nextPageToken,newStartPageToken,changes(changeType,fileId,removed,time,file(id,name,mimeType,modifiedTime,parents,trashed))").
 			Context(ctx).Do()
 		if err != nil {
 			return poll{}, err
 		}
 		for _, ch := range resp.Changes {
+			if ch.FileId == "" {
+				continue // a change to a shared drive itself, not to a file
+			}
 			x := Change{FileID: ch.FileId, Removed: ch.Removed, Time: ch.Time}
 			if ch.File != nil {
 				x.Name, x.MimeType, x.ModifiedTime = ch.File.Name, ch.File.MimeType, ch.File.ModifiedTime
@@ -256,18 +326,19 @@ func pollChanges(ctx context.Context, a *App, folder string, reset bool) (poll, 
 	}
 	return poll{Changes: out, Commit: func(ctx context.Context) error {
 		fd.Token = token
-		return commitFeed(ctx, a, key, read, fd, advance)
+		return commitFeed(ctx, a, c, key, read, fd, advance)
 	}}, nil
 }
 
-// folderTree returns the ids of everything inside folder, at any depth.
-func folderTree(ctx context.Context, d *drive.Service, folder string) (map[string]bool, error) {
+// folderTree returns the ids of everything inside folder, at any depth. driveID is the shared
+// drive the folder is in, or "" for My Drive.
+func folderTree(ctx context.Context, d *drive.Service, folder, driveID string) (map[string]bool, error) {
 	known := map[string]bool{}
 	queue := []string{folder}
 	for len(queue) > 0 {
 		parent := queue[0]
 		queue = queue[1:]
-		err := d.Files.List().Q(quoteQ(parent)+" in parents").PageSize(1000).
+		err := inDrive(d.Files.List().Q(quoteQ(parent)+" in parents").PageSize(1000), driveID).
 			Fields("nextPageToken,files(id,mimeType)").Pages(ctx, func(l *drive.FileList) error {
 			for _, f := range l.Files {
 				if known[f.Id] {
@@ -316,7 +387,7 @@ func (a *ancestry) under(id string, depth int) (bool, error) {
 	if depth > 64 {
 		return false, nil
 	}
-	f, err := a.drive.Files.Get(id).Fields("id,parents").Context(a.ctx).Do()
+	f, err := a.drive.Files.Get(id).Fields("id,parents").SupportsAllDrives(true).Context(a.ctx).Do()
 	if err != nil {
 		if apperrCode(err) == apperr.NotFound || apperrCode(err) == apperr.PermissionDenied {
 			a.memo[id] = false // e.g. My Drive root's parent, or a folder we cannot see
@@ -340,9 +411,10 @@ func (a *ancestry) under(id string, depth int) (bool, error) {
 }
 
 func runChanges(ctx context.Context, a *App, args []string) (any, error) {
-	const usage = "changes [--folder FOLDER_ID] [--peek] [--reset]"
+	const usage = "changes [--folder FOLDER_ID | --drive SHARED_DRIVE_ID] [--peek] [--reset]"
 	fs := newFlags("changes")
 	folder := fs.String("folder", "", "only report files inside this folder (any depth)")
+	sharedDrive := fs.String("drive", "", "report changes in this shared drive")
 	peek := fs.Bool("peek", false, "do not advance the stored position")
 	reset := fs.Bool("reset", false, "forget the stored position and start tracking from now")
 	pos, err := parseFlags(fs, args)
@@ -352,7 +424,11 @@ func runChanges(ctx context.Context, a *App, args []string) (any, error) {
 	if err := positional(pos, 0, 0, usage); err != nil {
 		return nil, err
 	}
-	p, err := pollChanges(ctx, a, *folder, *reset)
+	target, err := newFeedTarget(*folder, *sharedDrive)
+	if err != nil {
+		return nil, err
+	}
+	p, err := pollChanges(ctx, a, target, *reset)
 	if err != nil {
 		return nil, err
 	}
@@ -379,8 +455,8 @@ func runChanges(ctx context.Context, a *App, args []string) (any, error) {
 
 // watchOnce polls one feed and commits only after every change was written. No lock is held
 // while writing, so a stalled consumer cannot block other drivekey commands.
-func watchOnce(ctx context.Context, a *App, folder string) error {
-	p, err := pollChanges(ctx, a, folder, false)
+func watchOnce(ctx context.Context, a *App, target feedTarget) error {
+	p, err := pollChanges(ctx, a, target, false)
 	if err != nil {
 		return err
 	}
@@ -399,9 +475,10 @@ func (e *deliveryError) Error() string { return "write changes: " + e.err.Error(
 func (e *deliveryError) Unwrap() error { return e.err }
 
 func runWatch(ctx context.Context, a *App, args []string) (any, error) {
-	const usage = "watch [--folder FOLDER_ID] [--interval 60s]"
+	const usage = "watch [--folder FOLDER_ID | --drive SHARED_DRIVE_ID] [--interval 60s]"
 	fs := newFlags("watch")
 	folder := fs.String("folder", "", "only report files inside this folder (any depth)")
+	sharedDrive := fs.String("drive", "", "report changes in this shared drive")
 	interval := fs.Duration("interval", time.Minute, "time between polls")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
@@ -413,8 +490,12 @@ func runWatch(ctx context.Context, a *App, args []string) (any, error) {
 	if *interval < 5*time.Second {
 		return nil, apperr.New(apperr.Usage, "--interval must be at least 5s")
 	}
+	target, err := newFeedTarget(*folder, *sharedDrive)
+	if err != nil {
+		return nil, err
+	}
 	for {
-		if err := watchOnce(ctx, a, *folder); err != nil {
+		if err := watchOnce(ctx, a, target); err != nil {
 			if ctx.Err() != nil {
 				return nil, nil
 			}

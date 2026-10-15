@@ -31,6 +31,9 @@ type App struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Stdin  io.Reader
+	// Profile is the explicitly selected relay profile ("direct" for the local login), from
+	// --profile or $DRIVEKEY_PROFILE. Empty means no selection was made.
+	Profile string
 
 	clients *gapi.Clients
 }
@@ -52,7 +55,7 @@ func register(name string, c command) { commands[name] = c }
 
 // Main runs drivekey with args (without the program name) and returns the exit code.
 func Main(args []string) int {
-	a := &App{Stdout: os.Stdout, Stderr: os.Stderr, Stdin: os.Stdin}
+	a := &App{Stdout: os.Stdout, Stderr: os.Stderr, Stdin: os.Stdin, Profile: os.Getenv("DRIVEKEY_PROFILE")}
 	d, err := state.Default()
 	if err != nil {
 		return a.fail(err)
@@ -74,19 +77,30 @@ func Main(args []string) int {
 	return a.Run(ctx, args)
 }
 
-// Run dispatches one command.
+// Run dispatches one command. A leading --profile NAME selects a relay profile.
 func (a *App) Run(ctx context.Context, args []string) int {
+	for len(args) > 0 && (args[0] == "--profile" || args[0] == "-profile" ||
+		strings.HasPrefix(args[0], "--profile=") || strings.HasPrefix(args[0], "-profile=")) {
+		if _, v, ok := strings.Cut(args[0], "="); ok {
+			a.Profile, args = v, args[1:]
+			continue
+		}
+		if len(args) < 2 {
+			return a.fail(apperr.New(apperr.Usage, "--profile needs a profile name").WithHint("usage: drivekey --profile NAME COMMAND ..."))
+		}
+		a.Profile, args = args[1], args[2:]
+	}
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		a.usage(a.Stdout)
 		return 0
 	}
 	name, rest := args[0], args[1:]
-	if name == "sheet" {
+	if name == "sheet" || name == "profile" {
 		if len(rest) == 0 {
 			a.usage(a.Stderr)
 			return 2
 		}
-		name, rest = "sheet "+rest[0], rest[1:]
+		name, rest = name+" "+rest[0], rest[1:]
 	}
 	c, ok := commands[name]
 	if !ok {
@@ -154,15 +168,66 @@ func (a *App) usage(w io.Writer) {
 	}
 	fmt.Fprintln(w, "\nOutput is JSON. Errors go to stderr as {\"error\": {\"code\", \"message\", \"hint\"}}.")
 	fmt.Fprintln(w, "State lives in $DRIVEKEY_HOME (default ~/.config/drivekey).")
+	fmt.Fprintln(w, "Relay mode: `drivekey --profile NAME COMMAND` (or $DRIVEKEY_PROFILE=NAME) calls Google through")
+	fmt.Fprintln(w, "that Keyring relay profile; once any profile exists, every account command needs a profile")
+	fmt.Fprintln(w, "(`--profile direct` selects this machine's own login).")
 }
 
 // gcloud finds the gcloud binary bound to drivekey's private config.
 func (a *App) gcloud() (gcloud.Runner, error) { return gcloud.Find(a.Dir.GcloudConfig()) }
 
-// Clients returns API clients for the configured account and project.
+// relayProfile resolves the selected profile. It returns a nil profile for direct mode: no
+// relay profiles exist and none was selected, or "direct" was selected. Once any relay
+// profile exists the choice must be explicit, and an unknown name never falls back.
+func (a *App) relayProfile() (string, *state.Profile, error) {
+	profiles, err := a.Dir.LoadProfiles()
+	if err != nil {
+		return "", nil, err
+	}
+	switch a.Profile {
+	case state.DirectProfile:
+		return "", nil, nil
+	case "":
+		if len(profiles) == 0 {
+			return "", nil, nil
+		}
+		return "", nil, apperr.Newf(apperr.ProfileRequired, "relay profiles exist (%s); choose one explicitly", strings.Join(profileNames(profiles), ", ")).
+			WithHint("Run `drivekey --profile NAME ...` or set DRIVEKEY_PROFILE=NAME. `--profile direct` uses this machine's own login.")
+	}
+	p, ok := profiles[a.Profile]
+	if !ok {
+		return "", nil, apperr.Newf(apperr.ProfileNotFound, "no relay profile named %q", a.Profile).
+			WithHint("Run `drivekey profile list`, or add it with `drivekey profile add`.")
+	}
+	return a.Profile, &p, nil
+}
+
+func profileNames(p state.Profiles) []string {
+	names := make([]string, 0, len(p))
+	for n := range p {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Clients returns API clients for the selected relay profile, or for the configured
+// account and project in direct mode.
 func (a *App) Clients(ctx context.Context) (*gapi.Clients, error) {
 	if a.clients != nil {
 		return a.clients, nil
+	}
+	name, p, err := a.relayProfile()
+	if err != nil {
+		return nil, err
+	}
+	if p != nil {
+		c, err := gapi.NewRelay(ctx, name, *p, nil)
+		if err != nil {
+			return nil, err
+		}
+		a.clients = c
+		return c, nil
 	}
 	cfg, err := a.Dir.LoadConfig()
 	if err != nil {

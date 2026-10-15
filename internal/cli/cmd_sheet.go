@@ -124,7 +124,7 @@ func runSheetCreate(ctx context.Context, a *App, args []string) (any, error) {
 	if *parent != "" {
 		meta.Parents = []string{*parent}
 	}
-	f, err := c.Drive.Files.Create(meta).Fields(fileFields).Context(ctx).Do()
+	f, err := c.Drive.Files.Create(meta).Fields(fileFields).SupportsAllDrives(true).Context(ctx).Do()
 	if err != nil {
 		return nil, err
 	}
@@ -222,13 +222,29 @@ func runSheetWrite(ctx context.Context, a *App, args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.Sheets.Spreadsheets.Values.Update(pos[0], pos[1], &sheets.ValueRange{Values: values}).
-		ValueInputOption(inputOption(*raw)).Context(ctx).Do()
+	resp, err := updateValues(ctx, c.Sheets, pos[0], pos[1], values, *raw)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"updatedRange": resp.UpdatedRange, "updatedRows": resp.UpdatedRows,
 		"updatedColumns": resp.UpdatedColumns, "updatedCells": resp.UpdatedCells}, nil
+}
+
+// updateValues writes values at rng. It uses values:batchUpdate (a POST with the range in
+// the body) rather than values.update (a PUT with the range in the path), so it needs only
+// the GET and POST methods a Keyring Sheets grant allows by default.
+func updateValues(ctx context.Context, s *sheets.Service, id, rng string, values [][]any, raw bool) (*sheets.UpdateValuesResponse, error) {
+	resp, err := s.Spreadsheets.Values.BatchUpdate(id, &sheets.BatchUpdateValuesRequest{
+		ValueInputOption: inputOption(raw),
+		Data:             []*sheets.ValueRange{{Range: rng, Values: values}},
+	}).Context(ctx).Do()
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Responses) != 1 {
+		return nil, apperr.Newf(apperr.GoogleAPI, "Sheets answered %d results for one range", len(resp.Responses))
+	}
+	return resp.Responses[0], nil
 }
 
 func runSheetAppend(ctx context.Context, a *App, args []string) (any, error) {
@@ -396,8 +412,7 @@ func runSheetSet(ctx context.Context, a *App, args []string) (any, error) {
 		return nil, apperr.Newf(apperr.RowMoved, "the sheet changed while reading (row %d, %s = %q); nothing was written", row+1, *keyCol, *key).
 			WithHint("Someone is editing the sheet. Run the command again.")
 	}
-	if _, err := c.Sheets.Spreadsheets.Values.Update(id, target, &sheets.ValueRange{Values: [][]any{{*value}}}).
-		ValueInputOption(inputOption(*raw)).Context(ctx).Do(); err != nil {
+	if _, err := updateValues(ctx, c.Sheets, id, target, [][]any{{*value}}, *raw); err != nil {
 		return nil, err
 	}
 	ok, err = after.holds(ctx, c.Sheets, id)
