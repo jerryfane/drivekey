@@ -138,6 +138,7 @@ drivekey --profile business status    # relay health and which Google account an
 | Robot creates files (upload or empty Sheet) in the shared folder? | No: `storageQuotaExceeded`. It can create subfolders. |
 | User login edits Sheet cells, replaces file contents, sees changes? | Yes. |
 | User calls counted against the user's own project? | Only when `x-goog-user-project` is set. Without it they count against `gcloud`'s shared project, which already returned 429 rate limits during the test. |
+| Login still valid later, with no new login? | Yes on day 1 and day 7 (login 2026-10-04, checked 2026-10-05 and 2026-10-11). Day 30 was not measured: the test login was removed on 2026-10-16. |
 
 Design consequences:
 
