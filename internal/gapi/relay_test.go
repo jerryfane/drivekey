@@ -3,6 +3,7 @@ package gapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -147,7 +148,6 @@ func TestRelayErrorMapping(t *testing.T) {
 		{"relay has no token", 403, "relay: no token for role agent-personal", false, apperr.RelayDenied},
 		{"role revoked", 401, "Unauthorized: unknown role token", false, apperr.RelayDenied},
 		{"service not granted", 403, "Forbidden: role may not use this service", false, apperr.RelayDenied},
-		{"account signed out", 502, "Bad Gateway: gcloud token command failed; sign in again on the keyring host", false, apperr.RelayLoginRequired},
 		{"method not granted", 403, "Forbidden: method not allowed for this role", false, apperr.RelayDenied},
 		{"daily limit", 429, "Too Many Requests: daily limit reached", false, apperr.RelayDenied},
 		{"path refused", 400, `Bad Request: path must be /<service>/<path> in plain printable ASCII, without .., ;, % after decoding, or encoded / . \`, false, apperr.RelayRouteRefused},
@@ -169,6 +169,106 @@ func TestRelayErrorMapping(t *testing.T) {
 			_, err := c.Drive.Files.Get("abc").Do()
 			if e := MapError(err); e.Code != tc.want {
 				t.Fatalf("got %s (%v), want %s", e.Code, err, tc.want)
+			}
+		})
+	}
+}
+
+// renewalFailure answers like Keyring when it cannot renew the account's Google token: 502,
+// its fixed text body, and its diagnosis headers ("" leaves a header out).
+func renewalFailure(cause, stage, recovery, body string) func(http.ResponseWriter, *http.Request, int) {
+	return func(w http.ResponseWriter, r *http.Request, n int) {
+		for k, v := range map[string]string{CauseHeader: cause, StageHeader: stage, RecoveryHeader: recovery} {
+			if v != "" {
+				w.Header().Set(k, v)
+			}
+		}
+		plain(w, http.StatusBadGateway, body)
+	}
+}
+
+// A failed Google token renewal on the Keyring host is reported with Keyring's diagnosis.
+// Only cause reauth_required with recovery owner_reauth may tell the owner to sign in;
+// invalid, missing or inconsistent values must not. The body is never echoed, and the request
+// is sent once: retrying would only trigger more failing renewals.
+func TestRelayRenewalFailure(t *testing.T) {
+	const secret = "Bearer ya29.SECRET-TOKEN https://accounts.google.com/o/oauth2/auth?code=4/SECRET-CODE"
+	const fixed = "Bad Gateway: Google token renewal failed; see the Keyring renewal record"
+	for _, tc := range []struct {
+		name                         string
+		cause, stage, recovery, body string
+		code                         string
+		want                         [3]string
+		signIn                       bool
+	}{
+		{"reauth", "reauth_required", "command", "owner_reauth", fixed,
+			apperr.RelayLoginRequired, [3]string{"reauth_required", "command", "owner_reauth"}, true},
+		{"credentials invalid", "credentials_invalid", "token_validation", "owner_review_credentials", fixed,
+			apperr.RelayGoogleUnavailable, [3]string{"credentials_invalid", "token_validation", "owner_review_credentials"}, false},
+		{"runtime", "runtime_unavailable", "command_start", "repair_host", fixed,
+			apperr.RelayGoogleUnavailable, [3]string{"runtime_unavailable", "command_start", "repair_host"}, false},
+		{"permission", "permission_denied", "configuration", "repair_host", fixed,
+			apperr.RelayGoogleUnavailable, [3]string{"permission_denied", "configuration", "repair_host"}, false},
+		{"network", "network_error", "token_validation", "check_connectivity", fixed,
+			apperr.RelayGoogleUnavailable, [3]string{"network_error", "token_validation", "check_connectivity"}, false},
+		{"timeout", "timeout", "command", "inspect_host", fixed,
+			apperr.RelayGoogleUnavailable, [3]string{"timeout", "command", "inspect_host"}, false},
+		{"provider", "provider_error", "token_validation", "inspect_provider", fixed,
+			apperr.RelayGoogleUnavailable, [3]string{"provider_error", "token_validation", "inspect_provider"}, false},
+		{"unknown cause", "unknown", "command", "inspect_host", fixed,
+			apperr.RelayGoogleUnavailable, [3]string{"unknown", "command", "inspect_host"}, false},
+		{"sign-in recovery without reauth cause", "runtime_unavailable", "command", "owner_reauth", fixed,
+			apperr.RelayGoogleUnavailable, [3]string{"runtime_unavailable", "command", "unknown"}, false},
+		{"reauth cause without sign-in recovery", "reauth_required", "command", "repair_host", fixed,
+			apperr.RelayGoogleUnavailable, [3]string{"reauth_required", "command", "unknown"}, false},
+		{"recovery missing", "reauth_required", "command", "", fixed,
+			apperr.RelayGoogleUnavailable, [3]string{"reauth_required", "command", "unknown"}, false},
+		{"values outside the contract and secrets everywhere", "Reauth_Required " + secret, "x" + secret, "owner_reauth " + secret, fixed + " " + secret,
+			apperr.RelayGoogleUnavailable, [3]string{"unknown", "unknown", "unknown"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRelay{handle: renewalFailure(tc.cause, tc.stage, tc.recovery, tc.body)}
+			_, err := newRelayClients(t, f).Drive.Files.Get("abc").Do()
+			e := MapError(err)
+			if got := [3]string{e.Cause, e.Stage, e.Recovery}; e.Code != tc.code || got != tc.want {
+				t.Fatalf("got %s %v, want %s %v", e.Code, got, tc.code, tc.want)
+			}
+			out, _ := json.Marshal(e)
+			if s := string(out); strings.Contains(s, "SECRET") || strings.Contains(s, "accounts.google.com") || strings.Contains(s, "Bearer") {
+				t.Fatalf("error leaks response text: %s", s)
+			}
+			// The next step must read as a sentence about this account: a template that does
+			// not use the account would leave fmt's "%!(EXTRA ...)" in it.
+			if !strings.Contains(e.Hint, "account personal") || strings.Contains(e.Hint, "%!") {
+				t.Fatalf("malformed hint: %q", e.Hint)
+			}
+			if got := strings.Contains(e.Hint, "signs in to account"); got != tc.signIn {
+				t.Fatalf("sign-in hint = %v, want %v: %s", got, tc.signIn, e.Hint)
+			}
+			if len(f.hits) != 1 {
+				t.Fatalf("request sent %d times, want once", len(f.hits))
+			}
+		})
+	}
+
+	// Not a diagnosis: the headers on another status, or a Keyring 502 with no headers (an
+	// older Keyring whose text always says "sign in again"). Neither may ask for a sign-in.
+	// Writes, so the existing read retries do not add requests here.
+	for _, tc := range []struct {
+		name string
+		h    func(http.ResponseWriter, *http.Request, int)
+	}{
+		{"headers on a 503", func(w http.ResponseWriter, r *http.Request, n int) {
+			w.Header().Set(CauseHeader, "reauth_required")
+			w.Header().Set(RecoveryHeader, "owner_reauth")
+			plain(w, 503, "Service Unavailable: busy")
+		}},
+		{"older Keyring text", renewalFailure("", "", "", "Bad Gateway: gcloud token command failed; sign in again on the keyring host")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := newRelayClients(t, &fakeRelay{handle: tc.h}).Drive.Files.Create(&drive.File{Name: "x"}).Do()
+			if e := MapError(err); e.Code == apperr.RelayLoginRequired || e.Code == apperr.RelayGoogleUnavailable || strings.Contains(e.Hint, "sign") {
+				t.Fatalf("taken for a sign-in or renewal diagnosis: %+v", e)
 			}
 		})
 	}

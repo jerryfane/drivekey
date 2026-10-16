@@ -103,9 +103,15 @@ drivekey --profile business status    # relay health and which Google account an
   same profile. Upload sessions and redirects that point anywhere else are refused
   (`relay_route_refused`).
 - Errors: `relay_unreachable` (relay or Keyring host down), `relay_denied` (role unknown,
-  revoked, expired, not granted, or over its daily limit), `relay_login_required` (the
-  account must be signed in again on the Keyring host), `relay_token_rejected` (Google
-  rejected the token on a write; nothing was applied; run it again).
+  revoked, expired, not granted, or over its daily limit), `relay_login_required` (Keyring
+  reports that Google requires the account to sign in again on the Keyring host),
+  `relay_google_unavailable` (Keyring could not renew the token for another reason),
+  `relay_token_rejected` (Google rejected the token on a write; nothing was applied; run it again).
+- When Keyring cannot renew an account's token, the error and `status` show its diagnosis:
+  `cause` (for example `reauth_required`, `runtime_unavailable`, `network_error`, `unknown`),
+  `stage` and `recovery`, plus a next step. Only `reauth_required` with recovery `owner_reauth`
+  asks the owner to sign in again; unknown or missing diagnoses never do. drivekey does not
+  retry these failures.
 - The role needs these Keyring grants: Drive `GET`, `POST` on `/about`, `/files`, `/changes`,
   `/drives`; upload `POST`, `PATCH` on `/files` (`PATCH` only for `put --replace`); Sheets
   `GET`, `POST` on `/spreadsheets`.

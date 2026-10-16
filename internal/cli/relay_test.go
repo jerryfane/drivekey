@@ -14,6 +14,7 @@ import (
 	"google.golang.org/api/drive/v3"
 
 	"github.com/jerryfane/drivekey/internal/apperr"
+	"github.com/jerryfane/drivekey/internal/gapi"
 	"github.com/jerryfane/drivekey/internal/state"
 )
 
@@ -26,11 +27,30 @@ type relayFor struct {
 	g             *fakeGoogle
 	mu            sync.Mutex
 	paths         []string
+	// failRenewal, when set, makes every API call fail the way Keyring answers a failed Google
+	// token renewal, with this recovery.
+	failRenewal string
 }
 
 func (f *relayFor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/_relay/health" {
 		_, _ = w.Write([]byte("ok: keyring reachable at test\n"))
+		return
+	}
+	if f.failRenewal != "" {
+		// Keyring's answer to a failed Google token renewal (gitmoot/keyring#68).
+		cause := "runtime_unavailable"
+		if f.failRenewal == "owner_reauth" {
+			cause = "reauth_required"
+		} else if f.failRenewal == "owner_review_credentials" {
+			cause = "credentials_invalid"
+		}
+		w.Header().Set(gapi.CauseHeader, cause)
+		w.Header().Set(gapi.StageHeader, "command")
+		w.Header().Set(gapi.RecoveryHeader, f.failRenewal)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("Bad Gateway: Google token renewal failed\n"))
 		return
 	}
 	if r.Header.Get("Authorization") != "" {
@@ -264,4 +284,39 @@ func TestChangesFolderMovedToSharedDrive(t *testing.T) {
 		t.Fatalf("poll after move: %+v", e)
 	}
 	mustRun(t, a, "changes", "--folder", "F", "--reset")
+}
+
+// When Keyring cannot renew the account's Google token, status and commands report Keyring's
+// diagnosis and the matching next step; only recovery owner_reauth asks the owner to sign in.
+// Once it is fixed, the same profile works again with nothing to reset on this machine.
+func TestRelayRenewalFailureStatusAndRecovery(t *testing.T) {
+	r := newRelayFor(t, "business")
+	a, _ := relayApp(t, r)
+	a.Profile = "business"
+	for _, tc := range []struct{ recovery, code string }{
+		{"repair_host", apperr.RelayGoogleUnavailable},
+		{"owner_review_credentials", apperr.RelayGoogleUnavailable},
+		{"owner_reauth", apperr.RelayLoginRequired},
+	} {
+		r.failRenewal = tc.recovery
+		m := mustRun(t, a, "status")
+		e, _ := m["error"].(map[string]any)
+		next, _ := m["next"].(string)
+		if m["relay"] != "ok" || e["code"] != tc.code || e["recovery"] != tc.recovery || e["cause"] == nil {
+			t.Fatalf("%s: status = %v", tc.recovery, m)
+		}
+		if next == "" || next != e["hint"] {
+			t.Fatalf("%s: next %q does not follow the recovery's hint %q", tc.recovery, next, e["hint"])
+		}
+		if signIn := strings.Contains(next, "signs in to account business"); signIn != (tc.recovery == "owner_reauth") {
+			t.Fatalf("%s: next = %q", tc.recovery, next)
+		}
+		if _, ce := run(a, "ls", "F"); ce == nil || ce.Code != tc.code || ce.Recovery != tc.recovery {
+			t.Fatalf("%s: ls error = %+v", tc.recovery, ce)
+		}
+	}
+	r.failRenewal = ""
+	if m := mustRun(t, a, "status"); m["google_user"] != "relayed@example.com" || m["error"] != nil {
+		t.Fatalf("after recovery: status = %v", m)
+	}
 }

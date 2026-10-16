@@ -124,7 +124,8 @@ Rules that keep the user's data safe:
 | `relay_mode` | login/setup/logout do nothing for a relay profile | the owner manages that account on the Keyring host |
 | `relay_unreachable` | the relay or the Keyring host is down | tell the user; never switch to another login |
 | `relay_denied` | Keyring refused the role (unknown, revoked, expired, not granted, daily limit) | tell the user; the owner fixes it in the Keyring dashboard |
-| `relay_login_required` | the account must be signed in again on the Keyring host | tell the user |
+| `relay_login_required` | Keyring reports that Google requires this account to sign in again (`cause` reauth_required, `recovery` owner_reauth) | tell the user; the owner signs in again on the Keyring host |
+| `relay_google_unavailable` | Keyring could not renew the Google token for another reason; `cause`, `stage` and `recovery` in the error say which | follow the `hint`; do **not** ask the user to sign in again |
 | `relay_token_rejected` | Google rejected Keyring's token; the write was not applied | run the command again once |
 | `relay_route_refused` | a request would leave the profile's Keyring services | report it; do not work around it |
 
