@@ -4,7 +4,7 @@ Give your AI agent its own access to your Google Drive and Google Sheets.
 You open one link, log in with your Google account, and you are done.
 No clicking through the Google Cloud console, no app to register, nothing pre-configured.
 
-> **Status: early (v0.2.0).** All commands work against a real personal Google account.
+> **Status: early (v0.2.1).** All commands work against a real personal Google account.
 > Relay mode (Keyring) was tested end to end with a personal and a Workspace account, including a shared drive.
 > Linux, macOS and Windows binaries are on the [releases page](https://github.com/jerryfane/drivekey/releases).
 
