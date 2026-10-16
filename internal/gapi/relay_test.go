@@ -237,6 +237,11 @@ func TestRelayRenewalFailure(t *testing.T) {
 			if s := string(out); strings.Contains(s, "SECRET") || strings.Contains(s, "accounts.google.com") || strings.Contains(s, "Bearer") {
 				t.Fatalf("error leaks response text: %s", s)
 			}
+			// The next step must read as a sentence about this account: a template that does
+			// not use the account would leave fmt's "%!(EXTRA ...)" in it.
+			if !strings.Contains(e.Hint, "account personal") || strings.Contains(e.Hint, "%!") {
+				t.Fatalf("malformed hint: %q", e.Hint)
+			}
 			if got := strings.Contains(e.Hint, "signs in to account"); got != tc.signIn {
 				t.Fatalf("sign-in hint = %v, want %v: %s", got, tc.signIn, e.Hint)
 			}

@@ -161,9 +161,9 @@ var (
 		"owner_reauth":             "The owner signs in to account %[1]s again on the Keyring host; Keyring sends the steps. Nothing on this machine can fix it.",
 		"owner_review_credentials": "Keyring reports account %[1]s's saved Google credentials as invalid or revoked. The owner reviews them with the Keyring seat on the Keyring host.",
 		"repair_host":              "Ask the Keyring seat to repair account %[1]s's Google setup on the Keyring host. Signing in again does not fix this.",
-		"inspect_host":             "Ask the Keyring seat to inspect the Keyring host. Signing in again does not fix this.",
-		"check_connectivity":       "The Keyring host could not reach Google. Run the command again later; no sign-in is needed.",
-		"inspect_provider":         "Google answered with an error. Run the command again later; if it persists, ask the Keyring seat to check the renewal record. No sign-in is needed.",
+		"inspect_host":             "Ask the Keyring seat to inspect the Keyring host's renewal of account %[1]s. Signing in again does not fix this.",
+		"check_connectivity":       "The Keyring host could not reach Google to renew account %[1]s. Run the command again later; no sign-in is needed.",
+		"inspect_provider":         "Google answered with an error while renewing account %[1]s. Run the command again later; if it persists, ask the Keyring seat to check the renewal record. No sign-in is needed.",
 		"unknown":                  "Keyring did not give a usable diagnosis. Do not sign in again just for this: ask the Keyring seat to check account %[1]s's renewal record first.",
 	}
 )
