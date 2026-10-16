@@ -173,8 +173,10 @@ func relayStatus(ctx context.Context, a *App, name string, p state.Profile) rela
 	switch out.Error.Code {
 	case apperr.RelayDenied:
 		out.Next = "the owner approves role " + p.Role + " and grants its services in the Keyring dashboard"
-	case apperr.RelayLoginRequired:
-		out.Next = "the owner signs in account " + p.Account + " on the Keyring host"
+	case apperr.RelayLoginRequired, apperr.RelayGoogleUnavailable:
+		// The hint is chosen from Keyring's reported cause; only a proven sign-in need asks
+		// the owner to sign in.
+		out.Next = out.Error.Hint
 	default:
 		out.Next = "retry `drivekey --profile " + name + " status`"
 	}

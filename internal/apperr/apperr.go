@@ -39,9 +39,12 @@ const (
 	RelayUnreachable   = "relay_unreachable"
 	RelayDenied        = "relay_denied"
 	RelayLoginRequired = "relay_login_required"
-	RelayTokenRejected = "relay_token_rejected"
-	RelayRouteRefused  = "relay_route_refused"
-	RelayError         = "relay_error"
+	// RelayGoogleUnavailable: Keyring could not renew the Google token and did not ask for a new
+	// sign-in. The error's cause, stage and recovery fields carry Keyring's diagnosis.
+	RelayGoogleUnavailable = "relay_google_unavailable"
+	RelayTokenRejected     = "relay_token_rejected"
+	RelayRouteRefused      = "relay_route_refused"
+	RelayError             = "relay_error"
 )
 
 // Error is an error with a stable code, a message and an optional hint for the next step.
@@ -49,7 +52,12 @@ type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 	Hint    string `json:"hint,omitempty"`
-	Err     error  `json:"-"`
+	// Category, Stage and Recovery carry Keyring's safe diagnosis of a failed Google token
+	// renewal (gitmoot/keyring#68).
+	Cause    string `json:"cause,omitempty"`
+	Stage    string `json:"stage,omitempty"`
+	Recovery string `json:"recovery,omitempty"`
+	Err      error  `json:"-"`
 }
 
 func (e *Error) Error() string {

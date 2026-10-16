@@ -3,6 +3,7 @@ package gapi
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -82,15 +83,25 @@ func redactURL(u *url.URL) string {
 }
 
 // check turns a Keyring or relay refusal into an apperr. Both answer in plain text: the relay
-// prefixes "relay: ", Keyring "<status text>: ". Google's own errors are JSON and pass through.
+// prefixes "relay: ", Keyring "<status text>: ". A failed Google token renewal also carries
+// Keyring's diagnosis headers (renewalFailure). Google's own errors are JSON and pass through.
 // It may replace resp.Body.
 func (r *Relay) check(resp *http.Response) *apperr.Error {
-	if resp.StatusCode < 400 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/plain") {
+	if resp.StatusCode < 400 {
+		return nil
+	}
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/plain") {
 		return nil
 	}
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	resp.Body.Close()
-	resp.Body = io.NopCloser(bytes.NewReader(b))
+	// Keep the rest of the body: a long Google error must still parse.
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(b), resp.Body), resp.Body}
+	if e := r.renewalFailure(resp); e != nil {
+		return e
+	}
 	text := strings.TrimSpace(string(b))
 	p := r.Profile
 	who := "role " + p.Role + " (profile " + r.Name + ")"
@@ -112,7 +123,6 @@ func (r *Relay) check(resp *http.Response) *apperr.Error {
 	if !ok {
 		note = "this machine's address is not allowed"
 	}
-	lower := strings.ToLower(note)
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		return apperr.Newf(apperr.RelayDenied, "Keyring refused %s: %s", who, note).
@@ -126,13 +136,67 @@ func (r *Relay) check(resp *http.Response) *apperr.Error {
 	case resp.StatusCode == http.StatusBadRequest:
 		return apperr.Newf(apperr.RelayRouteRefused, "Keyring refused the request: %s", note).
 			WithHint("Keyring forwards only printable ASCII paths without '%', ';' or '\\'. A Sheets tab whose name has other characters cannot be addressed by name through Keyring.")
-	case strings.Contains(lower, "sign in again") || strings.Contains(lower, "set up the account") ||
-		strings.Contains(lower, "identity or expiry mismatch"):
-		return apperr.Newf(apperr.RelayLoginRequired, "Keyring cannot get a Google token for account %q: %s", p.Account, note).
-			WithHint("The owner must sign in to this Google account again on the Keyring host. Nothing on this machine can fix it.")
 	}
 	return apperr.Newf(apperr.RelayError, "Keyring: %s", note).
 		WithHint("Retry later. A write that failed this way may already have been applied; check before sending it again.")
+}
+
+// Keyring's diagnosis of a failed Google token renewal (gitmoot/keyring#68; wire contract
+// /root/fleet-tools/state/the-path/google-keyring-2026-10-16/wire-contract.txt). Keyring sets
+// them only on its own renewal failure (HTTP 502, text/plain) and strips them from upstream
+// responses.
+const (
+	CauseHeader    = "X-Keyring-Google-Cause"
+	StageHeader    = "X-Keyring-Google-Stage"
+	RecoveryHeader = "X-Keyring-Google-Recovery"
+)
+
+var (
+	renewalCauses = map[string]bool{"reauth_required": true, "credentials_invalid": true, "permission_denied": true,
+		"configuration_error": true, "runtime_unavailable": true, "network_error": true, "provider_error": true,
+		"timeout": true, "output_limit": true, "unknown": true}
+	renewalStages = map[string]bool{"configuration": true, "command_start": true, "command": true, "token_validation": true}
+	// renewalRecoveries is the next step for each recovery Keyring names; %[1]s is the account.
+	renewalRecoveries = map[string]string{
+		"owner_reauth":             "The owner signs in to account %[1]s again on the Keyring host; Keyring sends the steps. Nothing on this machine can fix it.",
+		"owner_review_credentials": "Keyring reports account %[1]s's saved Google credentials as invalid or revoked. The owner reviews them with the Keyring seat on the Keyring host.",
+		"repair_host":              "Ask the Keyring seat to repair account %[1]s's Google setup on the Keyring host. Signing in again does not fix this.",
+		"inspect_host":             "Ask the Keyring seat to inspect the Keyring host. Signing in again does not fix this.",
+		"check_connectivity":       "The Keyring host could not reach Google. Run the command again later; no sign-in is needed.",
+		"inspect_provider":         "Google answered with an error. Run the command again later; if it persists, ask the Keyring seat to check the renewal record. No sign-in is needed.",
+		"unknown":                  "Keyring did not give a usable diagnosis. Do not sign in again just for this: ask the Keyring seat to check account %[1]s's renewal record first.",
+	}
+)
+
+// renewalFailure reads Keyring's diagnosis headers on a 502. Values outside the contract become
+// "unknown"; only cause reauth_required together with recovery owner_reauth asks the owner to
+// sign in. A recovery that does not fit the cause (owner_reauth without reauth_required, or
+// reauth_required without owner_reauth) is reported as unknown, so an inconsistent diagnosis
+// never escalates to a sign-in. The response body is not echoed.
+func (r *Relay) renewalFailure(resp *http.Response) *apperr.Error {
+	h := resp.Header
+	if resp.StatusCode != http.StatusBadGateway || (h.Get(CauseHeader) == "" && h.Get(StageHeader) == "" && h.Get(RecoveryHeader) == "") {
+		return nil
+	}
+	cause, stage, recovery := allowed(renewalCauses, h.Get(CauseHeader)), allowed(renewalStages, h.Get(StageHeader)), h.Get(RecoveryHeader)
+	if _, ok := renewalRecoveries[recovery]; !ok || (recovery == "owner_reauth") != (cause == "reauth_required") {
+		recovery = "unknown"
+	}
+	code := apperr.RelayGoogleUnavailable
+	if recovery == "owner_reauth" {
+		code = apperr.RelayLoginRequired
+	}
+	e := apperr.Newf(code, "Keyring cannot renew the Google token for account %q (cause %s, stage %s)", r.Profile.Account, cause, stage).
+		WithHint(fmt.Sprintf(renewalRecoveries[recovery], r.Profile.Account))
+	e.Cause, e.Stage, e.Recovery = cause, stage, recovery
+	return e
+}
+
+func allowed(set map[string]bool, s string) string {
+	if set[s] {
+		return s
+	}
+	return "unknown"
 }
 
 // tokenRejected is returned when Google answers 401 to a relayed call: Keyring dropped the
