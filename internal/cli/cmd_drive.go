@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"mime"
 	"os"
@@ -25,7 +26,7 @@ const (
 )
 
 func init() {
-	register("ls", command{usage: "ls [FOLDER_ID] [--drive SHARED_DRIVE_ID] [--query Q] [--trashed]", summary: "List files (in a folder, a shared drive, or matching a Drive query).", run: runLs})
+	register("ls", command{usage: "ls [FOLDER_ID] [--drive SHARED_DRIVE_ID] [--query Q] [--trashed] [--limit N]", summary: "List files (in a folder, a shared drive, or matching a Drive query); at most 1000 unless --limit says otherwise.", run: runLs})
 	register("drives", command{usage: "drives", summary: "List the shared drives you are a member of.", run: runDrives})
 	register("info", command{usage: "info FILE_ID", summary: "Show one file's metadata.", run: runInfo})
 	register("get", command{usage: "get FILE_ID [--out PATH|-] [--export FORMAT] [--force]", summary: "Download a file; Google Docs/Sheets/Slides need --export.", run: runGet})
@@ -67,18 +68,30 @@ func quoteQ(s string) string {
 	return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", `\'`) + "'"
 }
 
+// lsDefaultLimit bounds a listing unless --limit says otherwise: listing a
+// whole large Drive page by page took minutes and never finished in time
+// for an agent (more than 30,000 files, seen live).
+const lsDefaultLimit = 1000
+
+// errLsFull stops paging once the limit is reached.
+var errLsFull = errors.New("ls: limit reached")
+
 func runLs(ctx context.Context, a *App, args []string) (any, error) {
-	const usage = "ls [FOLDER_ID] [--drive SHARED_DRIVE_ID] [--query Q] [--trashed]"
+	const usage = "ls [FOLDER_ID] [--drive SHARED_DRIVE_ID] [--query Q] [--trashed] [--limit N]"
 	fs := newFlags("ls")
 	sharedDrive := fs.String("drive", "", "list inside this shared drive (with no FOLDER_ID: all of it)")
 	query := fs.String("query", "", "extra Drive query, e.g. \"name contains 'cv'\"")
 	trashed := fs.Bool("trashed", false, "include trashed files")
+	limit := fs.Int("limit", lsDefaultLimit, "at most this many files (0: all); more sets \"truncated\"")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return nil, err
 	}
 	if err := positional(pos, 0, 1, usage); err != nil {
 		return nil, err
+	}
+	if *limit < 0 {
+		return nil, apperr.New(apperr.Usage, "--limit must be 0 or more").WithHint("usage: drivekey " + usage)
 	}
 	var parts []string
 	if len(pos) == 1 {
@@ -103,19 +116,40 @@ func runLs(ctx context.Context, a *App, args []string) (any, error) {
 		}
 		driveID = f.DriveId
 	}
+	pageSize := int64(1000)
+	if *limit > 0 && *limit < 1000 {
+		pageSize = int64(*limit) + 1 // one more shows whether there are more
+	}
+	call := inDrive(c.Drive.Files.List().Q(strings.Join(parts, " and ")).PageSize(pageSize), driveID).
+		Fields(googleapi.Field("nextPageToken,files(" + fileFields + ")"))
+	if !strings.Contains(*query, "fullText") {
+		call = call.OrderBy("folder,name") // Google refuses to sort a fullText search (400)
+	}
 	files := []File{}
-	call := inDrive(c.Drive.Files.List().Q(strings.Join(parts, " and ")).PageSize(1000), driveID).
-		OrderBy("folder,name").Fields(googleapi.Field("nextPageToken,files(" + fileFields + ")"))
+	truncated := false
 	err = call.Pages(ctx, func(l *drive.FileList) error {
 		for _, f := range l.Files {
+			if *limit > 0 && len(files) == *limit {
+				truncated = true
+				return errLsFull
+			}
 			files = append(files, fileOf(f))
+		}
+		if *limit > 0 && len(files) == *limit && l.NextPageToken != "" {
+			truncated = true
+			return errLsFull
 		}
 		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errLsFull) {
 		return nil, err
 	}
-	return map[string]any{"files": files}, nil
+	out := map[string]any{"files": files}
+	if truncated {
+		out["truncated"] = true
+		out["hint"] = "more files match: narrow it with a FOLDER_ID or --query \"name contains '...'\", or raise --limit"
+	}
+	return out, nil
 }
 
 // sharedDrive is drivekey's JSON view of a shared drive.
