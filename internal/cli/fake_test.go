@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +39,7 @@ type fakeGoogle struct {
 	// afterStartToken runs once after the start position is handed out; afterList runs once
 	// after the first folder listing.
 	afterStartToken, afterList func(g *fakeGoogle)
+	listPages                  int // whole-Drive list pages served
 }
 
 func newFakeGoogle(t *testing.T) *fakeGoogle {
@@ -128,9 +131,35 @@ func (g *fakeGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeBody(w, &drive.ChangeList{Changes: list, NewStartPageToken: "2"})
 	case p == "/drive/v3/files" && r.Method == http.MethodGet:
 		q := r.URL.Query()
-		before, _, _ := strings.Cut(q.Get("q"), " in parents")
-		parent := strings.Trim(before, "'")
+		if strings.Contains(q.Get("q"), "fullText") && q.Get("orderBy") != "" {
+			// Like Google: a fullText search cannot be sorted.
+			w.WriteHeader(http.StatusBadRequest)
+			writeBody(w, map[string]any{"error": map[string]any{"code": 400, "message": "Sorting is not supported for queries with fullText terms."}})
+			return
+		}
+		before, _, inParents := strings.Cut(q.Get("q"), " in parents")
 		files := []*drive.File{}
+		if !inParents {
+			// The whole Drive, in id order, a page at a time (pageToken: offset).
+			ids := make([]string, 0, len(g.files))
+			for id := range g.files {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			off, _ := strconv.Atoi(q.Get("pageToken"))
+			size, _ := strconv.Atoi(q.Get("pageSize"))
+			g.listPages++
+			list := &drive.FileList{}
+			for i := off; i < len(ids) && len(list.Files) < size; i++ {
+				list.Files = append(list.Files, g.files[ids[i]])
+				if i+1 < len(ids) && len(list.Files) == size {
+					list.NextPageToken = strconv.Itoa(i + 1)
+				}
+			}
+			writeBody(w, list)
+			return
+		}
+		parent := strings.Trim(before, "'")
 		for _, f := range g.children[parent] {
 			if f.DriveId == "" || (g.visible(r, f.Id) && q.Get("includeItemsFromAllDrives") == "true") {
 				files = append(files, f)

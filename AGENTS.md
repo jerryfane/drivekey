@@ -71,7 +71,8 @@ they get their own rate limits.
 
 | Task | Command |
 |---|---|
-| List a folder | `drivekey ls FOLDER_ID` (no id = whole Drive; `--query "name contains 'cv'"`; `--drive ID` = a shared drive) |
+| Find a file by name | `drivekey ls --query "name contains 'budget'"` (search first; don't list the whole Drive to look for something) |
+| List a folder | `drivekey ls FOLDER_ID` (no id = whole Drive; `--drive ID` = a shared drive). At most 1000 files: with more, the output has `"truncated": true`; narrow it, or `--limit N` (0 = all) |
 | List shared drives | `drivekey drives` |
 | File details | `drivekey info FILE_ID` |
 | Download a file | `drivekey get FILE_ID --out DIR_OR_PATH` |

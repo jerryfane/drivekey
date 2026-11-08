@@ -49,7 +49,7 @@ Everything the agent creates is owned by the user, in their own Drive.
 
 | Command | What it does |
 |---|---|
-| `ls`, `info`, `get`, `put`, `mkdir` | List, inspect, download (with `--export` for Google Docs files), upload or replace contents, create folders. Files in shared drives work too (`ls --drive ID` lists a whole shared drive). |
+| `ls`, `info`, `get`, `put`, `mkdir` | List, inspect, download (with `--export` for Google Docs files), upload or replace contents, create folders. Files in shared drives work too (`ls --drive ID` lists a whole shared drive). `ls` returns at most 1000 files unless `--limit` says otherwise, and marks a cut-off list `"truncated": true`. |
 | `drives` | List the shared drives the account is a member of. |
 | `sheet create`, `sheet tabs`, `sheet read`, `sheet write`, `sheet append` | Work with Google Sheets cell by cell, never by re-uploading the whole file. |
 | `sheet set` | Set one cell, finding the row by a key column and the column by its header name. Refuses to guess. |
